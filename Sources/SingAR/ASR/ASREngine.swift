@@ -101,62 +101,90 @@ private extension String {
     var utf8Data: Data { data(using: .utf8) ?? Data() }
 }
 
-/// Optional cloud step for premium users: re-ASR (`qwen3-asr-flash`) or
-/// LLM-polish (`qwen3-max`) over the local transcript, for top quality on
-/// technical terms / code.
+/// Optional premium cloud steps. The app ships with NO embedded key — both
+/// steps require a key (BYOK) or subscription token (proxy) in the Keychain.
 ///
-/// Two operation modes — the app ships with NO embedded key:
-///   - .byok:   user's own ZenMux key from Keychain → direct call to ZenMux.
-///   - .proxy:  subscription token from Keychain → request to the SingAR proxy,
-///              which holds the ZenMux key server-side. Billing/quota handled
-///              there. This is the monetisation path: local ASR free for all,
-///              cloud step behind a subscription.
+/// Two independent steps, two providers:
+///   - re-ASR    : transcribe the raw audio fresh with a top cloud model
+///                 (OpenRouter /audio/transcriptions). Best for technical terms
+///                 & code paths the local whisper mishears. Default model:
+///                 gpt-4o-mini-transcribe (best code-path recognition, ~1s,
+///                 ~$0.00012). gpt-4o-transcribe gives perfect slash-paths.
+///   - LLM-polish: clean up the local transcript with qwen3-max (ZenMux
+///                 chat completions, text-only). ~4s, ~$0.0001.
 ///
-/// `mode` is resolved from what's present in Keychain: a subscription token
-/// wins (proxy), otherwise a ZenMux key is used (BYOK), otherwise the cloud
-/// step is unavailable.
-final class ZenMuxASR {
+/// Each step resolves its own auth: BYOK key from Keychain, or subscription
+/// token routed via the SingAR proxy (key lives server-side there).
+final class CloudASR {
 
-    enum CloudMode {
-        case byok       // user's ZenMux key, direct
-        case proxy      // subscription token, via SingAR backend
-    }
+    private let settings = AppSettings.shared
 
-    /// The proxy backend. The ZenMux key lives only here, never in the app.
+    /// Proxy backend (SingAR). Keys live server-side, never in the app.
     private static let proxyBaseURL = URL(string: "https://api.singar.app/v1")!
-    private static let zenmuxBaseURL = URL(string: "https://zenmux.ai/api/v1")!
+    private static let openrouterURL = URL(string: "https://openrouter.ai/api/v1")!
+    private static let zenmuxURL = URL(string: "https://zenmux.ai/api/v1")!
 
-    private var mode: CloudMode? {
-        if KeychainStore.get(KeychainStore.Account.subscriptionToken) != nil { return .proxy }
-        if KeychainStore.get(KeychainStore.Account.zenmuxKey) != nil { return .byok }
-        return nil
+    // MARK: Availability
+
+    /// re-ASR is available if an OpenRouter key OR a subscription token is set.
+    var reASRAvailable: Bool {
+        KeychainStore.get(KeychainStore.Account.openrouterKey) != nil
+        || KeychainStore.get(KeychainStore.Account.subscriptionToken) != nil
     }
 
-    /// True if a cloud step is configured (key or subscription present).
-    var isAvailable: Bool { mode != nil }
+    /// LLM-polish is available if a ZenMux key OR a subscription token is set.
+    var llmPolishAvailable: Bool {
+        KeychainStore.get(KeychainStore.Account.zenmuxKey) != nil
+        || KeychainStore.get(KeychainStore.Account.subscriptionToken) != nil
+    }
 
-    // MARK: Re-ASR
+    // MARK: Re-ASR (OpenRouter /audio/transcriptions)
 
-    /// Send raw audio, get a fresh transcript from qwen3-asr-flash.
+    /// Transcribe raw audio bytes with the selected cloud model.
     func reASR(audio: Data, format: String = "wav") async -> String? {
-        let audioB64 = audio.base64EncodedString()
+        let b64 = audio.base64EncodedString()
         let payload: [String: Any] = [
-            "model": "qwen/qwen3-asr-flash",
-            "messages": [
-                ["role": "user", "content": [
-                    ["type": "text", "text": "Transcribe this audio verbatim."],
-                    ["type": "input_audio",
-                     "input_audio": ["data": audioB64, "format": format]],
-                ]]
-            ]
+            "model": settings.reASRModel.rawValue,
+            "input_audio": ["data": b64, "format": format],
         ]
-        return await post(payload: payload)
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        let (url, auth) = reASREndpoint()
+
+        var req = URLRequest(url: url.appendingPathComponent("audio/transcriptions"))
+        req.httpMethod = "POST"
+        req.httpBody = body
+        req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(auth)", forHTTPHeaderField: "Authorization")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                NSLog("[SingAR] re-ASR HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                return nil
+            }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let text = json["text"] as? String {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        } catch {
+            NSLog("[SingAR] re-ASR request failed: \(error)")
+            return nil
+        }
     }
 
-    // MARK: LLM polish
+    private func reASREndpoint() -> (URL, String) {
+        // Subscription token → proxy (key server-side). Else BYOK OpenRouter key.
+        if let token = KeychainStore.get(KeychainStore.Account.subscriptionToken) {
+            return (Self.proxyBaseURL, token)
+        }
+        return (Self.openrouterURL, KeychainStore.get(KeychainStore.Account.openrouterKey) ?? "")
+    }
 
-    /// Take the local transcript and have qwen3-max clean it up for code /
-    /// technical text (punctuation, identifiers, file paths).
+    // MARK: LLM-polish (ZenMux chat completions)
+
+    /// Clean up the local transcript for code / technical text.
     func llmPolish(text: String) async -> String? {
         let prompt = """
         You are a dictation post-processor for coding and technical text. Fix \
@@ -169,31 +197,22 @@ final class ZenMuxASR {
         """
         let payload: [String: Any] = [
             "model": "qwen/qwen3-max",
-            "messages": [
-                ["role": "user", "content": prompt]
-            ]
+            "messages": [["role": "user", "content": prompt]],
         ]
-        return await post(payload: payload)
-    }
-
-    // MARK: Shared request path
-
-    private func post(payload: [String: Any]) async -> String? {
-        guard let mode else { return nil }
-        let (url, auth) = endpoint(for: mode)
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        let (url, auth) = llmPolishEndpoint()
 
-        var request = URLRequest(url: url.appendingPathComponent("chat/completions"))
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.timeoutInterval = 60
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(auth)", forHTTPHeaderField: "Authorization")
+        var req = URLRequest(url: url.appendingPathComponent("chat/completions"))
+        req.httpMethod = "POST"
+        req.httpBody = body
+        req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(auth)", forHTTPHeaderField: "Authorization")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                NSLog("[SingAR] cloud step HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                NSLog("[SingAR] llmPolish HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
                 return nil
             }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -204,20 +223,15 @@ final class ZenMuxASR {
             }
             return nil
         } catch {
-            NSLog("[SingAR] cloud step request failed: \(error)")
+            NSLog("[SingAR] llmPolish request failed: \(error)")
             return nil
         }
     }
 
-    /// Resolve endpoint + auth header value per mode.
-    private func endpoint(for mode: CloudMode) -> (URL, String) {
-        switch mode {
-        case .byok:
-            return (Self.zenmuxBaseURL, KeychainStore.get(KeychainStore.Account.zenmuxKey) ?? "")
-        case .proxy:
-            // The proxy accepts the subscription token; it injects the ZenMux
-            // key server-side and forwards the request.
-            return (Self.proxyBaseURL, KeychainStore.get(KeychainStore.Account.subscriptionToken) ?? "")
+    private func llmPolishEndpoint() -> (URL, String) {
+        if let token = KeychainStore.get(KeychainStore.Account.subscriptionToken) {
+            return (Self.proxyBaseURL, token)
         }
+        return (Self.zenmuxURL, KeychainStore.get(KeychainStore.Account.zenmuxKey) ?? "")
     }
 }

@@ -5,9 +5,10 @@ import Security
 /// subscription tokens). Nothing sensitive is ever written to UserDefaults
 /// or the app binary.
 ///
-/// Two accounts are used:
-///   - "zenmux_key"   : the user's own ZenMux API key (BYOK mode)
-///   - "sub_token"    : subscription auth token issued by the SingAR proxy
+/// Accounts used:
+///   - "zenmux_key"       : user's own ZenMux API key (BYOK, LLM-polish)
+///   - "openrouter_key"   : user's own OpenRouter API key (BYOK, re-ASR)
+///   - "sub_token"        : subscription auth token issued by the SingAR proxy
 enum KeychainStore {
 
     private static let service = "app.singar"
@@ -52,8 +53,10 @@ enum KeychainStore {
 extension KeychainStore {
     /// Account identifiers.
     enum Account {
-        /// User's own ZenMux key (BYOK mode).
+        /// User's own ZenMux key (BYOK, LLM-polish).
         static let zenmuxKey = "zenmux_key"
+        /// User's own OpenRouter key (BYOK, re-ASR).
+        static let openrouterKey = "openrouter_key"
         /// Subscription token from the SingAR proxy (managed mode).
         static let subscriptionToken = "sub_token"
     }

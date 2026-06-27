@@ -16,11 +16,11 @@ final class DictationController {
     private let commands = VoiceCommandParser()
 
     private var whisper: ASREngine = WhisperEngine()
-    private let cloud = ZenMuxASR()
+    private let cloud = CloudASR()
 
     private var isDictating = false
     private var didPauseMedia = false
-    /// Raw audio captured this session, kept for a potential cloud re-ASR pass.
+    /// Raw audio captured this session, kept for a possible cloud re-ASR pass.
     private var capturedAudioData: Data?
 
     init(statusBar: StatusBarController) {
@@ -46,7 +46,7 @@ final class DictationController {
         audio.start { [weak self] buffer in
             guard let self else { return }
             self.vad.feed(buffer)
-            self.whisper.feed(buffer) { _ in /* partials: future C bridge */ }
+            self.whisper.feed(buffer) { _ in /* partials: future streaming */ }
         }
     }
 
@@ -57,7 +57,7 @@ final class DictationController {
         statusBar.setStatus(.recognizing)
 
         // Stash captured audio for a possible cloud re-ASR pass.
-        if settings.cloudStep == .reASR, cloud.isAvailable {
+        if settings.cloudStep == .reASR, cloud.reASRAvailable {
             capturedAudioData = flattenAudio()
         }
 
@@ -65,15 +65,17 @@ final class DictationController {
             guard let self else { return }
             var transcript = await self.whisper.finalize()
 
-            // Optional cloud step (premium): re-ASR from raw audio, or polish
-            // the local transcript. Only when a key/subscription is configured.
-            if self.settings.cloudStep != .off, self.cloud.isAvailable {
-                await MainActor.run { self.statusBar.setStatus(.cloud) }
-                if self.settings.cloudStep == .reASR, let audio = self.capturedAudioData {
+            // Optional premium cloud step. Only when configured.
+            if self.settings.cloudStep != .off {
+                if self.settings.cloudStep == .reASR, self.cloud.reASRAvailable,
+                   let audio = self.capturedAudioData {
+                    await MainActor.run { self.statusBar.setStatus(.cloud) }
                     if let cloudText = await self.cloud.reASR(audio: audio), !cloudText.isEmpty {
                         transcript = cloudText
                     }
-                } else if self.settings.cloudStep == .llmPolish, !transcript.isEmpty {
+                } else if self.settings.cloudStep == .llmPolish, self.cloud.llmPolishAvailable,
+                          !transcript.isEmpty {
+                    await MainActor.run { self.statusBar.setStatus(.cloud) }
                     if let polished = await self.cloud.llmPolish(text: transcript), !polished.isEmpty {
                         transcript = polished
                     }

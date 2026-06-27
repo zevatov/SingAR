@@ -72,6 +72,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(header("Облачный шаг:"))
         radioGroup(CloudStep.allCases, current: settings.cloudStep,
                    indent: 1, action: #selector(selectCloudStep(_:)), into: menu)
+        // Re-ASR model picker (only meaningful when re-ASR is selected).
+        if settings.cloudStep == .reASR {
+            menu.addItem(header("Модель re-ASR:", indent: 1))
+            radioGroup(ReASRModel.allCases, current: settings.reASRModel,
+                       indent: 2, action: #selector(selectReASRModel(_:)), into: menu)
+        }
 
         menu.addItem(.separator())
 
@@ -79,7 +85,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(header("Язык:"))
         radioGroup(ASRLanguage.allCases, current: settings.language,
                    indent: 1, action: #selector(selectLanguage(_:)), into: menu)
-        menu.addItem(header("Модель:"))
+        menu.addItem(header("Локальная модель:"))
         radioGroup(ASRModel.allCases, current: settings.model,
                    indent: 1, action: #selector(selectModel(_:)), into: menu)
 
@@ -108,10 +114,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return i
     }
 
-    private func header(_ title: String) -> NSMenuItem {
+    private func header(_ title: String, indent: Int = 0) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         i.isEnabled = false
-        i.indentationLevel = 0
+        i.indentationLevel = indent
         return i
     }
 
@@ -143,6 +149,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func selectMode(_ s: NSMenuItem)       { settings.mode = DictationMode.allCases[s.tag] }
     @objc private func selectMediaMode(_ s: NSMenuItem)  { settings.mediaMode = MediaPauseMode.allCases[s.tag] }
     @objc private func selectCloudStep(_ s: NSMenuItem)  { settings.cloudStep = CloudStep.allCases[s.tag] }
+    @objc private func selectReASRModel(_ s: NSMenuItem) { settings.reASRModel = ReASRModel.allCases[s.tag] }
     @objc private func selectLanguage(_ s: NSMenuItem)   { settings.language = ASRLanguage.allCases[s.tag] }
     @objc private func selectModel(_ s: NSMenuItem)      { settings.model = ASRModel.allCases[s.tag] }
 
