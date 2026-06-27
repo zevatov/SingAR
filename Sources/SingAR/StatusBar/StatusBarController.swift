@@ -86,6 +86,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(header("Режим:"))
         radioGroup(DictationMode.allCases, current: settings.mode,
                    indent: 1, action: #selector(selectMode(_:)), into: menu)
+        menu.addItem(header("Хоткей:", indent: 1))
+        radioGroup(HotkeyChoice.allCases, current: settings.hotkey,
+                   indent: 2, action: #selector(selectHotkey(_:)), into: menu)
 
         menu.addItem(check("Авто-пунктуация", on: settings.autoPunctuation, action: #selector(toggleAutoPunctuation)))
         menu.addItem(check("Голосовые команды", on: settings.voiceCommands, action: #selector(toggleVoiceCommands)))
@@ -180,6 +183,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: Actions — radio groups (index → enum case)
 
     @objc private func selectMode(_ s: NSMenuItem)       { settings.mode = DictationMode.allCases[s.tag] }
+    @objc private func selectHotkey(_ s: NSMenuItem)     { settings.hotkey = HotkeyChoice.allCases[s.tag] }
     @objc private func selectMediaMode(_ s: NSMenuItem)  { settings.mediaMode = MediaPauseMode.allCases[s.tag] }
     @objc private func selectCloudStep(_ s: NSMenuItem)  { settings.cloudStep = CloudStep.allCases[s.tag] }
     @objc private func selectReASRModel(_ s: NSMenuItem) { settings.reASRModel = ReASRModel.allCases[s.tag] }
@@ -211,6 +215,7 @@ private protocol MenuTitled {
     var title: String { get }
 }
 extension DictationMode: MenuTitled {}
+extension HotkeyChoice: MenuTitled {}
 extension MediaPauseMode: MenuTitled {}
 extension CloudStep: MenuTitled {}
 extension ASRLanguage: MenuTitled {}

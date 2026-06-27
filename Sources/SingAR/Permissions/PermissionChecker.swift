@@ -109,4 +109,23 @@ final class PermissionChecker {
             NSWorkspace.shared.open(url)
         }
     }
+
+    // MARK: Apple dictation conflict
+
+    /// True when Apple's built-in dictation is enabled — it grabs Fn/Globe at the
+    /// HID level, before our CGEventTap can see it, so SingAR's hotkey can't win
+    /// against it. The user must disable Apple dictation (or use an alternate key).
+    var appleDictationEnabled: Bool {
+        UserDefaults.standard.integer(forKey: "AppleDictationAutoEnable") == 1
+            // The HIToolbox default is what actually controls the Fn/Globe binding.
+            || (UserDefaults(suiteName: nil)?.integer(forKey: "AppleDictationAutoEnable") ?? 0) == 1
+    }
+
+    /// Open System Settings → Keyboard → Dictation so the user can disable Apple
+    /// dictation and free up Fn/Globe for SingAR.
+    func openAppleDictationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// All user-tunable options exposed through the menu bar. Values persist in
 /// UserDefaults and drive every subsystem (audio, ASR, injection, media, cloud).
@@ -6,6 +7,27 @@ enum DictationMode: String, CaseIterable {
     case hold
     case toggle
     var title: String { self == .hold ? "Hold-to-talk" : "Toggle" }
+}
+
+/// Which key triggers dictation. Fn/Globe is the natural Apple-dictation slot,
+/// but Apple grabs it at the HID level while its dictation is enabled — so we
+/// offer right-Option as an alternate that Apple never intercepts.
+enum HotkeyChoice: String, CaseIterable {
+    case fnOrGlobe
+    case rightOption
+    var title: String {
+        switch self {
+        case .fnOrGlobe:  return "Fn / Globe (нужно отключить Apple-диктовку)"
+        case .rightOption: return "Правый ⌥ Option (работает всегда)"
+        }
+    }
+    /// CGKeyCode for this trigger.
+    var keyCode: CGKeyCode {
+        switch self {
+        case .fnOrGlobe:  return 63   // Fn / Globe
+        case .rightOption: return 61  // Right Option
+        }
+    }
 }
 
 enum MediaPauseMode: String, CaseIterable {
@@ -67,6 +89,7 @@ final class AppSettings {
     private enum Key {
         static let enabled        = "enabled"
         static let mode           = "mode"
+        static let hotkey         = "hotkey"
         static let autoPunctuation = "autoPunctuation"
         static let voiceCommands  = "voiceCommands"
         static let livePartials   = "livePartials"
@@ -83,6 +106,7 @@ final class AppSettings {
         defaults.register(defaults: [
             Key.enabled:         true,
             Key.mode:            DictationMode.hold.rawValue,
+            Key.hotkey:          HotkeyChoice.rightOption.rawValue,
             Key.autoPunctuation: true,
             Key.voiceCommands:   true,
             Key.livePartials:    true,
@@ -128,6 +152,10 @@ final class AppSettings {
     var mode: DictationMode {
         get { DictationMode(rawValue: defaults.string(forKey: Key.mode) ?? "") ?? .hold }
         set { defaults.set(newValue.rawValue, forKey: Key.mode); fire() }
+    }
+    var hotkey: HotkeyChoice {
+        get { HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption }
+        set { defaults.set(newValue.rawValue, forKey: Key.hotkey); fire() }
     }
     var mediaMode: MediaPauseMode {
         get { MediaPauseMode(rawValue: defaults.string(forKey: Key.mediaMode) ?? "") ?? .pause }

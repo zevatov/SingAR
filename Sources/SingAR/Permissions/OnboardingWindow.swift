@@ -7,6 +7,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
 
     private let window: NSWindow
     private let rows: [PermissionKind: PermissionRow] = PermissionKind.allCases.reduce(into: [:]) { $0[$1] = PermissionRow($1) }
+    private var appleDictationRow: AppleDictationRow?
     private var watchTimer: Timer?
 
     override init() {
@@ -54,10 +55,17 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
         var y: CGFloat = 300
         for kind in PermissionKind.allCases {
             let row = rows[kind]!
-            row.frame = NSRect(x: 24, y: y, width: 492, height: 64)
+            row.frame = NSRect(x: 24, y: y, width: 492, height: 56)
             view.addSubview(row)
-            y -= 72
+            y -= 62
         }
+
+        // Step 4: disable Apple dictation (it grabs Fn/Globe at HID level).
+        let appleRow = AppleDictationRow()
+        appleRow.frame = NSRect(x: 24, y: y, width: 492, height: 56)
+        view.addSubview(appleRow)
+        appleDictationRow = appleRow
+        y -= 62
 
         let doneBtn = NSButton(title: "Готово", target: self, action: #selector(close))
         doneBtn.bezelStyle = .rounded
@@ -84,6 +92,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
             row.setStatus(s)
             if s != .granted { allOK = false }
         }
+        // Apple dictation: must be OFF (it conflicts with the Fn/Globe hotkey).
+        let appleOn = PermissionChecker.shared.appleDictationEnabled
+        appleDictationRow?.setStatus(appleOn ? AppleDictationRow.State.needsDisable : AppleDictationRow.State.ok)
+        if appleOn { allOK = false }
         doneButton?.title = allOK ? "Готово ✓" : "Я выдал — перепроверить"
     }
 
@@ -188,5 +200,80 @@ private final class PermissionRow: NSView {
 
     @objc private func openSettings() {
         PermissionChecker.shared.openSettings(for: kind)
+    }
+}
+
+// MARK: Apple dictation row
+
+final class AppleDictationRow: NSView {
+
+    enum State { case ok, needsDisable }
+
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let whyLabel = NSTextField(labelWithString: "")
+    private let statusDot = NSView()
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let openButton = NSButton(title: "Открыть", target: nil, action: nil)
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.5).cgColor
+
+        titleLabel.stringValue = "Отключить Apple-диктовку"
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.isBezeled = false
+        titleLabel.drawsBackground = false
+        titleLabel.frame = NSRect(x: 16, y: 30, width: 380, height: 20)
+        addSubview(titleLabel)
+
+        whyLabel.stringValue = "Apple перехватывает Fn/Globe на системном уровне — SingAR не сможет её использовать"
+        whyLabel.font = .systemFont(ofSize: 11)
+        whyLabel.textColor = .secondaryLabelColor
+        whyLabel.isBezeled = false
+        whyLabel.drawsBackground = false
+        whyLabel.frame = NSRect(x: 16, y: 12, width: 380, height: 16)
+        addSubview(whyLabel)
+
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 6
+        statusDot.frame = NSRect(x: 16, y: 0, width: 12, height: 12)
+        addSubview(statusDot)
+
+        statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        statusLabel.isBezeled = false
+        statusLabel.drawsBackground = false
+        statusLabel.frame = NSRect(x: 34, y: 0, width: 200, height: 14)
+        addSubview(statusLabel)
+
+        openButton.bezelStyle = .rounded
+        openButton.frame = NSRect(x: 392, y: 12, width: 84, height: 28)
+        openButton.target = self
+        openButton.action = #selector(openDictationSettings)
+        addSubview(openButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setStatus(_ s: State) {
+        switch s {
+        case .ok:
+            statusDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            statusLabel.stringValue = "Apple-диктовка выключена"
+            statusLabel.textColor = .systemGreen
+            openButton.isEnabled = false
+            openButton.title = "✓"
+        case .needsDisable:
+            statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            statusLabel.stringValue = "Apple-диктовка включена — отключите"
+            statusLabel.textColor = .systemOrange
+            openButton.isEnabled = true
+            openButton.title = "Открыть"
+        }
+    }
+
+    @objc private func openDictationSettings() {
+        PermissionChecker.shared.openAppleDictationSettings()
     }
 }

@@ -14,12 +14,12 @@ final class HotkeyManager {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    /// Fn/Globe keycode.
-    private let fnKeyCode: CGKeyCode = 63
+    /// Trigger keycode — read from settings (Fn/Globe or right-Option).
+    private var triggerKeyCode: CGKeyCode { settings.hotkey.keyCode }
     /// Esc keycode.
     private let escKeyCode: CGKeyCode = 53
 
-    private var isFnDown = false
+    private var isTriggerDown = false
     private var dictating = false
 
     init(onActivate: @escaping () -> Void, onDeactivate: @escaping () -> Void) {
@@ -96,34 +96,34 @@ final class HotkeyManager {
             return Unmanaged.passUnretained(event)
         }
 
-        guard keyCode == fnKeyCode else { return Unmanaged.passUnretained(event) }
+        guard keyCode == triggerKeyCode else { return Unmanaged.passUnretained(event) }
 
+        // Both Fn/Globe and right-Option arrive as flagsChanged events (they're
+        // modifier keys), so we handle them uniformly via the flagsChanged path.
         switch settings.mode {
         case .hold:
-            // Hold-to-talk: key down starts, key up stops.
-            let down = (type == .flagsChanged && !isFnDown) || type == .keyDown
-            if down && !isFnDown {
-                isFnDown = true
+            // Hold-to-talk: flag goes down → start; flag goes up → stop.
+            if type == .flagsChanged && !isTriggerDown {
+                isTriggerDown = true
                 if !dictating && settings.enabled {
                     dictating = true
                     onActivate()
                 }
-            } else if type == .keyUp || (type == .flagsChanged && isFnDown && !event.flags.contains(.maskSecondaryFn)) {
-                // Heuristic release detection; refined once we pin the exact event.
-                isFnDown = false
+            } else if type == .keyUp || (type == .flagsChanged && isTriggerDown) {
+                isTriggerDown = false
                 if dictating {
                     dictating = false
                     onDeactivate()
                 }
             }
         case .toggle:
-            // Toggle: a single press flips dictation on/off.
-            if type == .keyDown && !isFnDown {
-                isFnDown = true
+            // Toggle: a press flips dictation on/off.
+            if (type == .flagsChanged || type == .keyDown) && !isTriggerDown {
+                isTriggerDown = true
                 dictating.toggle()
                 if dictating { onActivate() } else { onDeactivate() }
-            } else if type == .keyUp {
-                isFnDown = false
+            } else if type == .keyUp || (type == .flagsChanged && isTriggerDown) {
+                isTriggerDown = false
             }
         }
 
