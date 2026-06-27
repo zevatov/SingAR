@@ -16,8 +16,8 @@ final class WhisperServerProcess {
     private var modelURL: URL = {
         let fm = FileManager.default
         // 1. Inside the app bundle (Contents/Resources/models).
-        if let bundleModel = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin")
-            ?? Bundle.main.url(forResource: "ggml-large-v3", withExtension: "bin") {
+        if let bundleModel = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin", subdirectory: "models")
+            ?? Bundle.main.url(forResource: "ggml-large-v3", withExtension: "bin", subdirectory: "models") {
             return bundleModel
         }
         // 2. Adjacent models/ directory (dev mode).
@@ -53,10 +53,12 @@ final class WhisperServerProcess {
             "-m", modelURL.path,
             "--host", host,
             "--port", String(port),
-            "--convert",          // server transcodes via ffmpeg
             "-l", "auto",
             "-nt",
         ]
+        // NOTE: `--convert` (ffmpeg transcoding) is omitted — we already write
+        // 16 kHz mono 16-bit PCM WAV, which whisper-server accepts directly.
+        // This avoids a PATH dependency on ffmpeg when launched via LaunchServices.
         proc.arguments = args
         proc.standardOutput = Pipe()
         proc.standardError = Pipe()
