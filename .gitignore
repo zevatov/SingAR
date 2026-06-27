@@ -8,4 +8,8 @@ Packages/
 .netrc
 # Whisper model weights (~1.5GB each) — downloaded, not committed.
 models/
+# Real secrets — never commit. Only .env.example is tracked.
+.env
+# Test audio samples (regenerable via `say`).
+test/
 
