@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build SingAR into a runnable .app bundle.
+# Build SingAR into a signed .app bundle.
 # Usage: ./build.sh [release]
 set -euo pipefail
 
@@ -14,7 +14,7 @@ echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG"
 
 BUILD_DIR=".build/$CONFIG"
-EXEC="$BUILD_DIR/singar"   # SwiftPM lowercases the executable name
+EXEC="$BUILD_DIR/singar"
 [[ -x "$EXEC" ]] || EXEC="$BUILD_DIR/SingAR"
 
 APP="build/SingAR.app"
@@ -29,21 +29,28 @@ cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 if [[ -f "models/ggml-large-v3-turbo.bin" ]]; then
     mkdir -p "$APP/Contents/Resources/models"
     cp "models/ggml-large-v3-turbo.bin" "$APP/Contents/Resources/models/"
-    echo "    bundled model (turbo)"
+    echo "    bundled model (turbo, 1.5GB)"
 elif [[ -f "models/ggml-large-v3.bin" ]]; then
     mkdir -p "$APP/Contents/Resources/models"
     cp "models/ggml-large-v3.bin" "$APP/Contents/Resources/models/"
     echo "    bundled model (large-v3)"
 fi
 
-# Optional: ad-hoc code sign so the bundle is recognised locally.
-codesign --force --sign - --entitlements - "$APP/Contents/MacOS/SingAR" 2>/dev/null || true
+# Sign with a STABLE identifier so TCC permissions persist. Clear xattr first
+# (resource forks break code signing). Ad-hoc signing keys TCC to cdhash, so
+# the app must be installed in a stable path (/Applications) and not rebuilt
+# after permissions are granted.
+echo "==> clearing xattr + code signing (identifier: app.singar)"
+xattr -cr "$APP"
+codesign --force --sign - --identifier app.singar "$APP"
 
-echo "==> built $APP"
-echo "Run with: open $APP"
+echo "==> verifying signature"
+codesign --verify --verbose "$APP" 2>&1 | head -1
+codesign -dv "$APP" 2>&1 | grep -iE "identifier|sealed" | head -2
+
+echo "==> built $APP ($(du -sh "$APP" | cut -f1))"
 echo ""
-echo "Note: first run requires granting permissions in System Settings:"
-echo "  - Privacy & Security → Microphone"
-echo "  - Privacy & Security → Accessibility"
-echo "  - Privacy & Security → Input Monitoring"
-echo "And disable Apple dictation: System Settings → Keyboard → Dictation → Off"
+if [[ "$CONFIG" == "release" ]]; then
+    echo "Run: open $APP"
+    echo "Or install to /Applications: cp -R $APP /Applications/"
+fi
