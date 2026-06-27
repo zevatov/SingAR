@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictation: DictationController!
     private var hotkey: HotkeyManager!
     private let settingsWindow = SettingsWindow()
+    private let onboardingWindow = OnboardingWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No dock icon / main window — pure menu-bar agent.
@@ -27,13 +28,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.settingsWindow.show()
         }
         statusBar.onConfigureHotkey = { [weak self] in
-            self?.openHotkeyHelp()
+            // If permissions are missing, onboarding covers the guidance.
+            // Otherwise open Keyboard settings to disable Apple dictation.
+            if PermissionChecker.shared.allGranted {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation") {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                self?.onboardingWindow.show()
+            }
+        }
+        statusBar.onOpenOnboarding = { [weak self] in
+            self?.onboardingWindow.show()
         }
 
-        // Permissions + launch-at-login, deferred slightly so the menu shows first.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.checkPermissions()
-            self?.applyLaunchAtLogin()
+        // Onboarding: show on first run, or any time permissions are missing.
+        // Trigger the mic + accessibility prompts up front so the user sees them.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self else { return }
+            PermissionChecker.shared.requestMicrophone()
+            PermissionChecker.shared.requestAccessibility()
+            if !OnboardingWindow.completed || !PermissionChecker.shared.allGranted {
+                self.onboardingWindow.show()
+            }
+            self.applyLaunchAtLogin()
         }
     }
 
@@ -42,36 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WhisperServerProcess.shared.stop()
     }
 
-    // MARK: Permissions
-
-    private func checkPermissions() {
-        // Accessibility (for CGEventTap + Cmd+V injection).
-        let trusted = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-        )
-        if !trusted {
-            NSLog("[SingAR] Accessibility permission not granted — hotkey inactive.")
-        }
-
-        // Microphone: trigger the system prompt by touching AVAudioApplication.
-        AVAudioApplication.requestRecordPermission { granted in
-            if !granted {
-                NSLog("[SingAR] Microphone permission denied.")
-            }
-        }
-    }
-
-    private func openHotkeyHelp() {
-        // Guide the user to disable Apple dictation and grant Input Monitoring.
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     // MARK: Launch at login
 
-    /// Toggle a launch agent so SingAR starts at login (no SMAppService dependency
-    /// on older macOS; works via a standard LaunchAgent plist).
     private func applyLaunchAtLogin() {
         let enabled = AppSettings.shared.launchAtLogin
         let bundleId = "app.singar"

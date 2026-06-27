@@ -13,6 +13,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     /// Wired by AppDelegate so menu actions can open UI.
     var onOpenSettings: (() -> Void)?
     var onConfigureHotkey: (() -> Void)?
+    var onOpenOnboarding: (() -> Void)?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -126,6 +127,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(check("Запускать при входе", on: settings.launchAtLogin, action: #selector(toggleLaunchAtLogin)))
         menu.addItem(item("Хоткей…", action: #selector(configureHotkey)))
         menu.addItem(item("Настройки…", action: #selector(openSettings)))
+        menu.addItem(item("Онбординг и разрешения…", action: #selector(openOnboarding)))
         menu.addItem(.separator())
         menu.addItem(item("Quit SingAR", action: #selector(terminate), key: "q"))
     }
@@ -192,6 +194,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func openSettings() {
         onOpenSettings?()
+    }
+
+    @objc private func openOnboarding() {
+        onOpenOnboarding?()
     }
 
     @objc private func terminate() {
