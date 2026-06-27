@@ -9,11 +9,18 @@ final class WhisperServerProcess {
     static let shared = WhisperServerProcess()
 
     private var process: Process?
+    private var stoppedManually = false
     private let port: Int = 8080
     private let host: String = "127.0.0.1"
 
     private var modelURL: URL = {
         let fm = FileManager.default
+        // 1. Inside the app bundle (Contents/Resources/models).
+        if let bundleModel = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin")
+            ?? Bundle.main.url(forResource: "ggml-large-v3", withExtension: "bin") {
+            return bundleModel
+        }
+        // 2. Adjacent models/ directory (dev mode).
         for path in ["models/ggml-large-v3-turbo.bin", "models/ggml-large-v3.bin"] {
             let abs = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(path)
             if fm.fileExists(atPath: abs.path) { return abs }
@@ -32,6 +39,7 @@ final class WhisperServerProcess {
     @discardableResult
     func start() -> Bool {
         guard process == nil else { return true }
+        stoppedManually = false
         guard FileManager.default.isReadableFile(atPath: modelURL.path) else {
             NSLog("[SingAR] model not found at \(modelURL.path)")
             return false
@@ -53,6 +61,18 @@ final class WhisperServerProcess {
         proc.standardOutput = Pipe()
         proc.standardError = Pipe()
 
+        // Auto-restart if the server crashes.
+        proc.terminationHandler = { [weak self] p in
+            guard let self else { return }
+            NSLog("[SingAR] whisper-server exited (\(p.terminationStatus))")
+            self.process = nil
+            // Relaunch after a brief delay unless we deliberately stopped it.
+            guard !self.stoppedManually else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.start()
+            }
+        }
+
         do {
             try proc.run()
         } catch {
@@ -64,8 +84,25 @@ final class WhisperServerProcess {
         return true
     }
 
-    /// Stop the server.
+    /// True if the server is reachable (quick synchronous health probe).
+    var isHealthy: Bool {
+        var request = URLRequest(url: baseURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 2
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+            ok = (response as? HTTPURLResponse)?.statusCode == 200
+            sem.signal()
+        }
+        task.resume()
+        _ = sem.wait(timeout: .now() + 2)
+        return ok
+    }
+
+    /// Stop the server (deliberately — no auto-restart).
     func stop() {
+        stoppedManually = true
         process?.terminate()
         process = nil
     }

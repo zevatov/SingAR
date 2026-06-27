@@ -8,6 +8,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let settings = AppSettings.shared
     private var status: AppStatus = .idle
+    private var pulseTimer: Timer?
 
     /// Wired by AppDelegate so menu actions can open UI.
     var onOpenSettings: (() -> Void)?
@@ -27,6 +28,25 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     func setStatus(_ status: AppStatus) {
         self.status = status
         renderButton()
+        updatePulseAnimation()
+    }
+
+    /// Pulse the listening glyph so the user sees dictation is live.
+    private func updatePulseAnimation() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        guard status == .listening else { return }
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+            self?.togglePulse()
+        }
+    }
+
+    private var pulsed = false
+    private func togglePulse() {
+        pulsed.toggle()
+        guard let button = statusItem.button else { return }
+        // Flicker opacity for a subtle "listening" heartbeat.
+        button.contentTintColor = pulsed ? status.color.withAlphaComponent(0.4) : status.color
     }
 
     /// Screen-space frame of the status item button, for anchoring overlays.
