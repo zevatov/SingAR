@@ -10,44 +10,17 @@ protocol ASREngine {
     func finalize() async -> String
 }
 
-/// whisper.cpp backed by the `whisper-cli` binary (CoreML/Metal). For the M1
-/// spike we run the CLI as a subprocess over a WAV file; later this becomes an
-/// in-process C bridge for true streaming partials.
+/// Local ASR via a long-lived `whisper-server` (HTTP `/inference`). The model
+/// stays resident in memory, so each dictation is ~1.7s with no cold start.
 final class WhisperEngine: ASREngine {
 
     private let settings = AppSettings.shared
     private var buffers: [AVAudioPCMBuffer] = []
-
-    /// Path to the ggml model. Looked up from a few conventional locations.
-    private let modelURL: URL = {
-        let candidates = [
-            "models/ggml-large-v3-turbo.bin",
-            "models/ggml-large-v3.bin",
-        ]
-        let fm = FileManager.default
-        for path in candidates {
-            let abs: URL
-            if path.hasPrefix("/") {
-                abs = URL(fileURLWithPath: path)
-            } else {
-                abs = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(path)
-            }
-            if fm.fileExists(atPath: abs.path) { return abs }
-        }
-        // Fall back to the turbo name; finalize() will surface the error.
-        return URL(fileURLWithPath: "models/ggml-large-v3-turbo.bin")
-    }()
-
-    private var cliPath: String {
-        // Homebrew install location; fallback to PATH lookup.
-        let fm = FileManager.default
-        let brew = "/opt/homebrew/bin/whisper-cli"
-        if fm.isExecutableFile(atPath: brew) { return brew }
-        return "whisper-cli"
-    }
+    private let server = WhisperServerProcess.shared
 
     func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void) {
-        // Subprocess mode: just accumulate. Partials come from a future C bridge.
+        // HTTP mode: accumulate buffers; partials require the streaming endpoint
+        // (whisper-stream) — TODO for live partials.
         buffers.append(buffer)
     }
 
@@ -64,62 +37,68 @@ final class WhisperEngine: ASREngine {
             return ""
         }
 
-        let result = await runCLI(audio: tmp)
+        let result = await transcribeViaServer(audio: tmp)
         buffers.removeAll()
         try? FileManager.default.removeItem(at: tmp)
         return result
     }
 
-    private func runCLI(audio: URL) async -> String {
-        guard FileManager.default.isReadableFile(atPath: modelURL.path) else {
-            NSLog("[SingAR] model not found at \(modelURL.path)")
+    private func transcribeViaServer(audio: URL) async -> String {
+        let endpoint = server.baseURL.appendingPathComponent("inference")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+
+        let boundary = "----SingAR\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+
+        // file field
+        let filename = audio.lastPathComponent
+        let fileData = (try? Data(contentsOf: audio)) ?? Data()
+        body.append("--\(boundary)\r\n".utf8Data)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".utf8Data)
+        body.append("Content-Type: audio/wav\r\n\r\n".utf8Data)
+        body.append(fileData)
+        body.append("\r\n".utf8Data)
+
+        // temperature
+        body.append("--\(boundary)\r\n".utf8Data)
+        body.append("Content-Disposition: form-data; name=\"temperature\"\r\n\r\n0.0\r\n".utf8Data)
+
+        // response_format
+        body.append("--\(boundary)\r\n".utf8Data)
+        body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\njson\r\n".utf8Data)
+
+        // language
+        let lang = settings.language == .auto ? "auto" : settings.language.rawValue
+        body.append("--\(boundary)\r\n".utf8Data)
+        body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n\(lang)\r\n".utf8Data)
+
+        body.append("--\(boundary)--\r\n".utf8Data)
+        request.httpBody = body
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                NSLog("[SingAR] whisper-server HTTP error: \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                return ""
+            }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let text = json["text"] as? String {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            NSLog("[SingAR] whisper-server request failed: \(error)")
             return ""
-        }
-        guard FileManager.default.isExecutableFile(atPath: cliPath) || cliPath == "whisper-cli" else {
-            NSLog("[SingAR] whisper-cli not found at \(cliPath)")
-            return ""
-        }
-
-        return await withCheckedContinuation { continuation in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: cliPath == "whisper-cli" ? "/usr/bin/env" : cliPath)
-            var args: [String] = []
-            if cliPath == "whisper-cli" {
-                args = ["whisper-cli"]
-            }
-            args += ["-m", modelURL.path, "-f", audio.path, "--no-timestamps", "-nt"]
-
-            // Language: auto unless pinned.
-            if settings.language != .auto {
-                args += ["-l", settings.language.rawValue]
-            }
-
-            proc.arguments = args
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = Pipe()
-
-            do {
-                try proc.run()
-            } catch {
-                NSLog("[SingAR] whisper-cli launch failed: \(error)")
-                continuation.resume(returning: "")
-                return
-            }
-
-            proc.terminationHandler = { _ in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                // whisper-cli prints the transcript as plain lines (with -nt).
-                let transcript = raw
-                    .split(separator: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .joined(separator: " ")
-                    .trimmingCharacters(in: .whitespaces)
-                continuation.resume(returning: transcript)
-            }
         }
     }
+}
+
+private extension String {
+    var utf8Data: Data { data(using: .utf8) ?? Data() }
 }
 
 /// Optional cloud re-ASR / LLM-polish through ZenMux.

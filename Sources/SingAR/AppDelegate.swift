@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No dock icon / main window — pure menu-bar agent.
         NSApp.setActivationPolicy(.accessory)
 
+        // Keep the ASR model resident so dictation has no cold start.
+        WhisperServerProcess.shared.start()
+
         statusBar = StatusBarController()
         dictation = DictationController(statusBar: statusBar)
         hotkey = HotkeyManager(
@@ -24,5 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkey?.uninstall()
+        WhisperServerProcess.shared.stop()
     }
 }
