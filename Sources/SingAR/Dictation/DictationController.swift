@@ -16,9 +16,12 @@ final class DictationController {
     private let commands = VoiceCommandParser()
 
     private var whisper: ASREngine = WhisperEngine()
+    private let cloud = ZenMuxASR()
 
     private var isDictating = false
     private var didPauseMedia = false
+    /// Raw audio captured this session, kept for a potential cloud re-ASR pass.
+    private var capturedAudioData: Data?
 
     init(statusBar: StatusBarController) {
         self.statusBar = statusBar
@@ -53,10 +56,33 @@ final class DictationController {
         audio.stop()
         statusBar.setStatus(.recognizing)
 
+        // Stash captured audio for a possible cloud re-ASR pass.
+        if settings.cloudStep == .reASR, cloud.isAvailable {
+            capturedAudioData = flattenAudio()
+        }
+
         Task { [weak self] in
             guard let self else { return }
-            let transcript = await self.whisper.finalize()
-            await MainActor.run { self.finish(with: transcript) }
+            var transcript = await self.whisper.finalize()
+
+            // Optional cloud step (premium): re-ASR from raw audio, or polish
+            // the local transcript. Only when a key/subscription is configured.
+            if self.settings.cloudStep != .off, self.cloud.isAvailable {
+                await MainActor.run { self.statusBar.setStatus(.cloud) }
+                if self.settings.cloudStep == .reASR, let audio = self.capturedAudioData {
+                    if let cloudText = await self.cloud.reASR(audio: audio), !cloudText.isEmpty {
+                        transcript = cloudText
+                    }
+                } else if self.settings.cloudStep == .llmPolish, !transcript.isEmpty {
+                    if let polished = await self.cloud.llmPolish(text: transcript), !polished.isEmpty {
+                        transcript = polished
+                    }
+                }
+                self.capturedAudioData = nil
+            }
+
+            let finalText = transcript
+            await MainActor.run { self.finish(with: finalText) }
         }
     }
 
@@ -64,6 +90,7 @@ final class DictationController {
         guard isDictating else { return }
         isDictating = false
         audio.stop()
+        capturedAudioData = nil
         resumeMediaIfNeeded()
         statusBar.setStatus(.idle)
     }
@@ -75,12 +102,28 @@ final class DictationController {
         if settings.voiceCommands {
             output = commands.process(output)
         }
-        // TODO(M4): if settings.cloudStep != .off, re-ASR or LLM-polish here.
         injector.insert(output)
         resumeMediaIfNeeded()
         statusBar.setStatus(.done)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.statusBar.setStatus(.idle)
+        }
+    }
+
+    /// Concatenate captured PCM buffers into a single WAV blob for cloud re-ASR.
+    private func flattenAudio() -> Data? {
+        let buffers = audio.capturedBuffers
+        guard !buffers.isEmpty else { return nil }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("singar-cloud-\(UUID().uuidString).wav")
+        do {
+            try WAVWriter.write(buffers, to: tmp)
+            let data = try Data(contentsOf: tmp)
+            try? FileManager.default.removeItem(at: tmp)
+            return data
+        } catch {
+            NSLog("[SingAR] flattenAudio failed: \(error)")
+            return nil
         }
     }
 
