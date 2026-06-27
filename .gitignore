@@ -6,3 +6,6 @@ DerivedData/
 Packages/
 *.xcuserdata
 .netrc
+# Whisper model weights (~1.5GB each) — downloaded, not committed.
+models/
+

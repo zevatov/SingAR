@@ -4,9 +4,6 @@ import AVFoundation
 /// Orchestrates a single dictation cycle:
 /// hotkey → audio capture + VAD → ASR (local, ±cloud) → text injection,
 /// with media pause/resume around it and live status pushed to the menu bar.
-///
-/// Wiring is scaffolded; subsystems are stubbed with their final interfaces so
-/// each milestone plugs in without reshaping this controller.
 final class DictationController {
 
     private let statusBar: StatusBarController
@@ -19,15 +16,16 @@ final class DictationController {
     private let commands = VoiceCommandParser()
 
     private var whisper: ASREngine = WhisperEngine()
-    private var cloud: ZenMuxASR?
 
     private var isDictating = false
     private var didPauseMedia = false
-    private var partialTranscript: String = ""
 
     init(statusBar: StatusBarController) {
         self.statusBar = statusBar
-        // TODO(M4): instantiate `cloud` when a ZenMux key is present in Keychain.
+        vad.onEndOfSpeech = { [weak self] in
+            // End-of-speech fires on the audio thread; hop to main.
+            DispatchQueue.main.async { self?.stopDictation() }
+        }
     }
 
     // MARK: Public (called by HotkeyManager)
@@ -35,40 +33,42 @@ final class DictationController {
     func startDictation() {
         guard settings.enabled, !isDictating else { return }
         isDictating = true
-        partialTranscript = ""
 
         if settings.pauseMedia {
             didPauseMedia = media.pauseBackgroundMedia()
         }
 
+        vad.reset()
         statusBar.setStatus(.listening)
-        // TODO(M1): audio.start { [weak self] buffer in self?.handle(buffer) }
+        audio.start { [weak self] buffer in
+            guard let self else { return }
+            self.vad.feed(buffer)
+            self.whisper.feed(buffer) { _ in /* partials: future C bridge */ }
+        }
     }
 
     func stopDictation() {
         guard isDictating else { return }
         isDictating = false
+        audio.stop()
         statusBar.setStatus(.recognizing)
 
-        // TODO(M1): audio.stop() then run ASR on captured PCM.
-        let final = partialTranscript   // placeholder until ASR is wired
-        finish(with: final)
+        Task { [weak self] in
+            guard let self else { return }
+            let transcript = await self.whisper.finalize()
+            await MainActor.run { self.finish(with: transcript) }
+        }
     }
 
     func cancelDictation() {
+        guard isDictating else { return }
         isDictating = false
-        partialTranscript = ""
-        // TODO(M1): audio.stop()
+        audio.stop()
         resumeMediaIfNeeded()
         statusBar.setStatus(.idle)
     }
 
     // MARK: Pipeline
-
-    private func handle(_ buffer: AVAudioPCMBuffer) {
-        // TODO(M1): feed VAD; on end-of-speech call stopDictation().
-        // TODO(M1): stream chunks to WhisperEngine for partial transcripts.
-    }
 
     private func finish(with text: String) {
         var output = text
