@@ -17,6 +17,7 @@ final class DictationController {
 
     private var whisper: ASREngine = WhisperEngine()
     private let cloud = CloudASR()
+    private let overlay = DictationOverlay()
 
     private var isDictating = false
     private var didPauseMedia = false
@@ -43,10 +44,23 @@ final class DictationController {
 
         vad.reset()
         statusBar.setStatus(.listening)
+
+        // Show the overlay anchored under the status item.
+        if let button = statusBar.statusItemButtonFrame {
+            overlay.show(near: button.origin)
+        }
+
         audio.start { [weak self] buffer in
             guard let self else { return }
             self.vad.feed(buffer)
-            self.whisper.feed(buffer) { _ in /* partials: future streaming */ }
+            self.overlay.pulse()
+            if self.settings.livePartials {
+                self.whisper.feed(buffer) { partial in
+                    self.overlay.setTranscript(partial)
+                }
+            } else {
+                self.whisper.feed(buffer) { _ in }
+            }
         }
     }
 
@@ -54,6 +68,7 @@ final class DictationController {
         guard isDictating else { return }
         isDictating = false
         audio.stop()
+        overlay.hide()
         statusBar.setStatus(.recognizing)
 
         // Stash captured audio for a possible cloud re-ASR pass.
@@ -92,6 +107,7 @@ final class DictationController {
         guard isDictating else { return }
         isDictating = false
         audio.stop()
+        overlay.hide()
         capturedAudioData = nil
         resumeMediaIfNeeded()
         statusBar.setStatus(.idle)

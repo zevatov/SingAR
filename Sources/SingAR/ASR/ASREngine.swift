@@ -12,35 +12,63 @@ protocol ASREngine {
 
 /// Local ASR via a long-lived `whisper-server` (HTTP `/inference`). The model
 /// stays resident in memory, so each dictation is ~1.7s with no cold start.
+/// Live partials are produced by periodically re-inferring the accumulated
+/// audio (every ~1.2s) — the model is resident so each partial is cheap.
 final class WhisperEngine: ASREngine {
 
     private let settings = AppSettings.shared
     private var buffers: [AVAudioPCMBuffer] = []
     private let server = WhisperServerProcess.shared
 
+    /// Partial-streaming state.
+    private var partialTask: Task<Void, Never>?
+    private var isInferring = false
+
     func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void) {
-        // HTTP mode: accumulate buffers; partials require the streaming endpoint
-        // (whisper-stream) — TODO for live partials.
         buffers.append(buffer)
+        // Kick off the partial-streaming loop on first buffer.
+        if partialTask == nil {
+            partialTask = Task { [weak self] in
+                await self?.runPartials(onPartial: onPartial)
+            }
+        }
+    }
+
+    /// Periodically transcribe accumulated audio and emit partials.
+    private func runPartials(onPartial: @escaping (String) -> Void) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s
+            guard !Task.isCancelled, !buffers.isEmpty, !isInferring else { continue }
+            isInferring = true
+            let snap = buffers
+            let text = await infer(buffers: snap)
+            isInferring = false
+            if !text.isEmpty { onPartial(text) }
+        }
     }
 
     func finalize() async -> String {
+        partialTask?.cancel()
+        partialTask = nil
         guard !buffers.isEmpty else { return "" }
+        let final = await infer(buffers: buffers)
+        buffers.removeAll()
+        return final
+    }
 
+    /// Transcribe the given buffers via the whisper-server /inference endpoint.
+    private func infer(buffers: [AVAudioPCMBuffer]) async -> String {
+        guard !buffers.isEmpty else { return "" }
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("singar-\(UUID().uuidString).wav")
         do {
             try WAVWriter.write(buffers, to: tmp)
         } catch {
             NSLog("[SingAR] WAV write failed: \(error)")
-            buffers.removeAll()
             return ""
         }
-
-        let result = await transcribeViaServer(audio: tmp)
-        buffers.removeAll()
-        try? FileManager.default.removeItem(at: tmp)
-        return result
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        return await transcribeViaServer(audio: tmp)
     }
 
     private func transcribeViaServer(audio: URL) async -> String {
@@ -75,6 +103,12 @@ final class WhisperEngine: ASREngine {
         let lang = settings.language == .auto ? "auto" : settings.language.rawValue
         body.append("--\(boundary)\r\n".utf8Data)
         body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n\(lang)\r\n".utf8Data)
+
+        // Punctuation: suppress via prompt when the user disabled auto-punctuation.
+        if !settings.autoPunctuation {
+            body.append("--\(boundary)\r\n".utf8Data)
+            body.append("Content-Disposition: form-data; name=\"prompt\"\r\n\r\n\r\n".utf8Data)
+        }
 
         body.append("--\(boundary)--\r\n".utf8Data)
         request.httpBody = body

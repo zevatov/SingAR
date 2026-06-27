@@ -38,6 +38,18 @@ final class TextInjector {
         }
     }
 
+    /// Insert text, replacing any current selection in the focused field first
+    /// (Apple-dictation style: selected text is overwritten by the transcript).
+    func insertReplacingSelection(_ text: String) {
+        guard !text.isEmpty else { return }
+        // Clear the selection with Delete, then paste. This replaces whatever
+        // was highlighted without disturbing the surrounding text.
+        postKey(virtualKey: 0x33, flags: []) // Delete
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            self?.insert(text)
+        }
+    }
+
     private func postPaste() {
         let source = CGEventSource(stateID: .hidSystemState)
         let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)  // Cmd
@@ -50,5 +62,16 @@ final class TextInjector {
         vDown?.post(tap: .cghidEventTap)
         vUp?.post(tap: .cghidEventTap)
         cmdUp?.post(tap: .cghidEventTap)
+    }
+
+    /// Post a single key event with optional modifier flags.
+    private func postKey(virtualKey: CGKeyCode, flags: CGEventFlags) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
+        down?.flags = flags
+        up?.flags = flags
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
     }
 }

@@ -9,6 +9,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let settings = AppSettings.shared
     private var status: AppStatus = .idle
 
+    /// Wired by AppDelegate so menu actions can open UI.
+    var onOpenSettings: (() -> Void)?
+    var onConfigureHotkey: (() -> Void)?
+
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -23,6 +27,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     func setStatus(_ status: AppStatus) {
         self.status = status
         renderButton()
+    }
+
+    /// Screen-space frame of the status item button, for anchoring overlays.
+    var statusItemButtonFrame: NSRect? {
+        statusItem.button?.window?.convertToScreen(
+            statusItem.button?.bounds ?? .zero
+        )
     }
 
     // MARK: Button
@@ -156,11 +167,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: Actions — misc
 
     @objc private func configureHotkey() {
-        // TODO(M2): open hotkey configuration window.
+        onConfigureHotkey?()
     }
 
     @objc private func openSettings() {
-        // TODO(M5): open settings window.
+        onOpenSettings?()
     }
 
     @objc private func terminate() {
