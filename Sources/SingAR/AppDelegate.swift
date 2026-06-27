@@ -43,11 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Onboarding: show on first run, or any time permissions are missing.
-        // Trigger the mic + accessibility prompts up front so the user sees them.
+        // The window itself triggers all three permission prompts up front.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             guard let self else { return }
-            PermissionChecker.shared.requestMicrophone()
-            PermissionChecker.shared.requestAccessibility()
             if !OnboardingWindow.completed || !PermissionChecker.shared.allGranted {
                 self.onboardingWindow.show()
             }

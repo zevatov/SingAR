@@ -25,6 +25,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
 
     func show() {
         NSApp.activate(ignoringOtherApps: true)
+        // Trigger all three prompts so the user sees them up front.
+        PermissionChecker.shared.requestMicrophone()
+        PermissionChecker.shared.requestAccessibility()
+        PermissionChecker.shared.requestInputMonitoring()
         refresh()
         window.makeKeyAndOrderFront(nil)
         startWatching()
@@ -81,14 +85,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
             if s != .granted { allOK = false }
         }
         doneButton?.title = allOK ? "Готово ✓" : "Я выдал — перепроверить"
-        if allGrantedBefore == false, allOK {
-            // All just granted — flash and enable.
-            doneButton?.title = "Готово ✓"
-        }
-        allGrantedBefore = allOK
     }
-
-    private var allGrantedBefore = false
 
     private func startWatching() {
         watchTimer?.invalidate()
@@ -169,26 +166,24 @@ private final class PermissionRow: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func setStatus(_ s: PermissionStatus) {
+        let (color, text, textColor, btnEnabled, btnTitle): (NSColor, String, NSColor, Bool, String)
         switch s {
         case .granted:
-            statusDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
-            statusLabel.stringValue = "разрешено"
-            statusLabel.textColor = .systemGreen
-            openButton.isEnabled = false
-            openButton.title = "✓"
+            (color, text, textColor, btnEnabled, btnTitle) =
+                (.systemGreen, "разрешено", .systemGreen, false, "✓")
         case .denied:
-            statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
-            statusLabel.stringValue = "запрещено — включите вручную"
-            statusLabel.textColor = .systemRed
-            openButton.isEnabled = true
-            openButton.title = "Открыть"
+            (color, text, textColor, btnEnabled, btnTitle) =
+                (.systemRed, "запрещено — включите вручную", .systemRed, true, "Открыть")
         case .unknown:
-            statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
-            statusLabel.stringValue = "ожидает разрешения"
-            statusLabel.textColor = .systemOrange
-            openButton.isEnabled = true
-            openButton.title = "Открыть"
+            (color, text, textColor, btnEnabled, btnTitle) =
+                (.systemOrange, "ожидает разрешения", .systemOrange, true, "Открыть")
         }
+        statusDot.layer?.backgroundColor = color.cgColor
+        statusDot.needsDisplay = true
+        statusLabel.stringValue = text
+        statusLabel.textColor = textColor
+        openButton.isEnabled = btnEnabled
+        openButton.title = btnTitle
     }
 
     @objc private func openSettings() {
