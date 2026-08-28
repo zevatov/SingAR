@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 
 /// Orchestrates real-time live typing dictation:
-/// hotkey → live microphone capture → real-time keystroke typing into active app → sub-second AI polish finish.
+/// hotkey → live microphone capture → real-time keystroke typing into active app → instant release & high-precision Gemini 3.5 audio polish.
 final class DictationController {
 
     private let statusBar: StatusBarController
@@ -58,11 +58,14 @@ final class DictationController {
         hasLiveTyped = false
         logStage("recording", startedAt: recordingStartedAt)
 
-        // Smart Media Pause (only if media is actively playing)
+        // Smart Media Pause (immediately pause, track if playback was active)
         if settings.pauseMedia {
-            media.pauseIfPlaying { [weak self] didPause in
-                self?.didPauseMedia = didPause
+            media.isMediaPlaying { [weak self] isPlaying in
+                if isPlaying {
+                    self?.didPauseMedia = true
+                }
             }
+            media.pauseBackgroundMedia()
         }
 
         vad.reset()
@@ -122,8 +125,12 @@ final class DictationController {
         logStage("recording", startedAt: recordingStartedAt, completed: true)
         logStage("transcribing", startedAt: transcribingStartedAt)
 
-        statusBar.setStatus(.recognizing)
-        indicator.setStatus(.recognizing)
+        let captured = audio.capturedBuffers
+        audio.stop()
+        SoundFeedback.stop()
+        indicator.hide()
+        statusBar.setStatus(.idle)
+        resumeMediaIfNeeded()
 
         Task { [weak self] in
             guard let self else { return }
@@ -144,9 +151,10 @@ final class DictationController {
 
             var finalText = self.processed(transcript)
 
-            // 2. Ultra-Fast AI Polish (~150-250ms latency)
-            if self.settings.cloudCleanup && self.cloud.available && !finalText.isEmpty {
-                if let polished = await self.cloud.polish(text: finalText), !polished.isEmpty {
+            // 2. High-precision Gemini 3.5 Audio Transcription Polish
+            if self.settings.cloudCleanup && self.cloud.available,
+               let audioData = WAVWriter.wavData(from: captured) {
+                if let polished = await self.cloud.cloudTranscribe(audio: audioData), !polished.isEmpty {
                     finalText = self.processed(polished)
                     provider = "gemini-live+polish"
                     model = "gemini-3.5-transcribe"
@@ -162,11 +170,9 @@ final class DictationController {
                 self.logStage("transcribing", startedAt: transcribingStartedAt, completed: true)
 
                 if self.hasLiveTyped {
-                    // Smoothly apply the final polished text to the screen
+                    // Smoothly apply the final polished audio text to the screen
                     self.applyPolishedText(textToCommit)
                 } else if !textToCommit.isEmpty {
-                    self.statusBar.setStatus(.inserting)
-                    self.indicator.setStatus(.inserting)
                     self.injector.insert(textToCommit)
                 }
 
@@ -180,8 +186,6 @@ final class DictationController {
                         text: textToCommit
                     ))
                 }
-
-                self.finish()
             }
         }
     }
@@ -298,14 +302,6 @@ final class DictationController {
             return commands.process(raw)
         }
         return raw
-    }
-
-    private func finish() {
-        audio.stop()
-        SoundFeedback.stop()
-        indicator.hide()
-        resumeMediaIfNeeded()
-        statusBar.setStatus(.idle)
     }
 
     private func resumeMediaIfNeeded() {

@@ -8,9 +8,9 @@ final class MediaController {
     private let handle: UnsafeMutableRawPointer?
 
     private static let commands: [String: Int32] = [
+        "kMRMediaRemoteCommandPlay": 0,
         "kMRMediaRemoteCommandPause": 1,
-        "kMRMediaRemoteCommandPlay": 2,
-        "kMRMediaRemoteCommandTogglePlayPause": 3,
+        "kMRMediaRemoteCommandTogglePlayPause": 2,
     ]
 
     init() {
@@ -32,26 +32,13 @@ final class MediaController {
         fn(DispatchQueue.main, completion)
     }
 
-    /// Intelligently pauses media ONLY if it is actively playing.
-    /// Passes `true` to completion if media was paused, `false` if it was already silent.
-    func pauseIfPlaying(completion: @escaping (Bool) -> Void) {
-        isMediaPlaying { [weak self] isPlaying in
-            guard let self else {
-                completion(false)
-                return
-            }
-            if isPlaying {
-                self.sendCommand("kMRMediaRemoteCommandPause")
-                completion(true)
-            } else {
-                completion(false)
-            }
-        }
+    /// Pauses background media immediately.
+    func pauseBackgroundMedia() {
+        sendCommand("kMRMediaRemoteCommandPause")
     }
 
     /// Resumes playback of whatever was previously paused.
     func resumeBackgroundMedia() {
-        guard handle != nil else { return }
         sendCommand("kMRMediaRemoteCommandPlay")
     }
 
@@ -65,8 +52,8 @@ final class MediaController {
     private func sendCommand(_ commandKey: String) {
         guard let commandValue = Self.commands[commandKey] else { return }
         guard let send = symbol("MRMediaRemoteSendCommand") else { return }
-        typealias FnSend = @convention(c) (Int32, NSDictionary?) -> Void
+        typealias FnSend = @convention(c) (Int32, NSDictionary?) -> Bool
         let fn = unsafeBitCast(send, to: FnSend.self)
-        fn(commandValue, nil)
+        _ = fn(commandValue, nil)
     }
 }
