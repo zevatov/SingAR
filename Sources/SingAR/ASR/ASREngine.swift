@@ -218,6 +218,79 @@ final class CloudASR {
         }
     }
 
+    // MARK: Ultra-fast Text Polish via Gemini (~150-250ms)
+
+    func polish(text: String) async -> String? {
+        guard settings.cloudCleanup, !text.isEmpty else { return nil }
+        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else { return nil }
+
+        let languageRule: String
+        switch settings.language {
+        case .auto:
+            languageRule = "Format Russian in Cyrillic and English in Latin for tech words. Do NOT translate."
+        case .ru:
+            languageRule = "Format primarily in Russian Cyrillic, keeping code/tech terms in English. Do NOT translate to English."
+        case .en:
+            languageRule = "Format in English."
+        }
+
+        let promptText = """
+        You are a fast speech text polisher for a developer.
+        Format and punctuate this dictated text:
+        1. Fix punctuation, capitalization, and grammatical structure naturally.
+        2. Preserve programming variable names (camelCase, snake_case), file paths (e.g. /usr/bin), and technical commands.
+        3. Remove spoken filler sounds (ээ, мм, ну).
+        4. \(languageRule)
+        5. Output ONLY the polished text. No explanations, no markdown fences, no quotes.
+
+        Text:
+        \(text)
+        """
+
+        let payload: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        ["text": promptText]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "temperature": 0.0,
+                "maxOutputTokens": 1024
+            ]
+        ]
+
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=\(apiKey)"
+        guard let url = URL(string: urlString) else { return nil }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.httpBody = body
+        req.timeoutInterval = 8
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let candidates = json["candidates"] as? [[String: Any]],
+                  let firstCandidate = candidates.first,
+                  let content = firstCandidate["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]],
+                  let firstPart = parts.first,
+                  let polishedText = firstPart["text"] as? String else {
+                return nil
+            }
+
+            return polishedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: Google Gemini 3.5 Transcribe API
 
     private func transcribeWithGoogleGemini(audio: Data) async -> String? {

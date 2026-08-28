@@ -101,7 +101,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            // Interactive Hotkey & Mode Configuration
+            // Interactive Hotkey & Mode Configuration (Clean single chevron)
             VStack(spacing: 8) {
                 // Hotkey Switcher
                 HStack {
@@ -113,19 +113,15 @@ struct MenuBarView: View {
                         Button("Правый ⌥ Option (рекоменд.)") { settings.hotkey = .rightOption }
                         Button("Fn / Globe") { settings.hotkey = .fnOrGlobe }
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(settings.hotkey == .rightOption ? "Правый ⌥ Option" : "Fn / Globe")
-                                .font(.system(size: 11, weight: .medium))
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 8))
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(5)
+                        Text(settings.hotkey == .rightOption ? "Правый ⌥ Option" : "Fn / Globe")
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(5)
                     }
                     .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
 
                 // Mode Switcher
@@ -138,19 +134,15 @@ struct MenuBarView: View {
                         Button("Hold (удержание)") { settings.mode = .hold }
                         Button("Toggle (нажал-сказал)") { settings.mode = .toggle }
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(settings.mode == .toggle ? "Toggle (нажал-сказал)" : "Hold (удержание)")
-                                .font(.system(size: 11, weight: .medium))
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 8))
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(5)
+                        Text(settings.mode == .toggle ? "Toggle (нажал-сказал)" : "Hold (удержание)")
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(5)
                     }
                     .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
             }
             .padding(10)
@@ -228,6 +220,7 @@ struct MenuBarView: View {
             HStack(spacing: 8) {
                 Button {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        history.reload()
                         isHistoryExpanded.toggle()
                     }
                 } label: {
@@ -256,6 +249,7 @@ struct MenuBarView: View {
         .padding(14)
         .frame(width: 290)
         .onAppear {
+            history.reload()
             allPermissionsGranted = PermissionChecker.shared.allGranted
         }
     }

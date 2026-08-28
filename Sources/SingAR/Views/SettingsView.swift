@@ -3,6 +3,8 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var history = DictationHistory.shared
+
     @State private var googleApiKey = ""
     @State private var isVerifyingKey = false
     @State private var keyStatus: KeyValidationStatus = .untested
@@ -10,6 +12,8 @@ struct SettingsView: View {
     @State private var isMicGranted = false
     @State private var isAccessibilityGranted = false
     @State private var isSpeechGranted = false
+    @State private var isHistoryExpanded = false
+    @State private var copiedIndex: Int?
 
     private var allPermissionsGranted: Bool {
         isMicGranted && isAccessibilityGranted && isSpeechGranted
@@ -233,7 +237,157 @@ struct SettingsView: View {
                     )
                 }
 
-                // Section 4: macOS System Permissions (Shown ONLY when permissions are missing)
+                // Section 4: Statistics & History (ReTypeR-style)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Статистика и История")
+                        .font(.headline)
+                        .foregroundColor(.primary)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        // 2x2 Metric Grid
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                            // Cell 1: Dictations count
+                            VStack(spacing: 4) {
+                                Image(systemName: "mic.fill")
+                                    .font(.title3)
+                                    .foregroundColor(Color.brandAccent)
+                                Text("Диктовки")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                Text("\(history.totalDictations)")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.primary.opacity(0.03))
+                            .cornerRadius(8)
+
+                            // Cell 2: Characters count
+                            VStack(spacing: 4) {
+                                Image(systemName: "character.textbox")
+                                    .font(.title3)
+                                    .foregroundColor(Color.brandGreen)
+                                Text("Символы")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                Text("\(history.totalCharacters)")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.primary.opacity(0.03))
+                            .cornerRadius(8)
+
+                            // Cell 3: History Toggle Button
+                            Button(action: {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                    history.reload()
+                                    isHistoryExpanded.toggle()
+                                }
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .font(.title3)
+                                        .foregroundColor(isHistoryExpanded ? Color.brandAccent : .secondary)
+                                    Text("История")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.primary)
+                                    Text(isHistoryExpanded ? "Скрыть" : "Показать (\(history.items.count))")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 10)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.primary.opacity(isHistoryExpanded ? 0.08 : 0.03))
+                                .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
+
+                            // Cell 4: Reset Button
+                            Button(action: {
+                                history.clear()
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "trash")
+                                        .font(.title3)
+                                        .foregroundColor(.secondary)
+                                    Text("Очистить")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.primary)
+                                    Text("Сбросить историю")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 10)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.primary.opacity(0.03))
+                                .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        // Collapsible History List in Settings
+                        if isHistoryExpanded {
+                            let entries = Array(history.items.reversed())
+                            if entries.isEmpty {
+                                Text("История записей пуста")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.vertical, 12)
+                            } else {
+                                ScrollView {
+                                    VStack(spacing: 6) {
+                                        ForEach(Array(entries.enumerated()), id: \.offset) { index, item in
+                                            Button {
+                                                copyToClipboard(item.text, at: index)
+                                            } label: {
+                                                VStack(alignment: .leading, spacing: 3) {
+                                                    HStack {
+                                                        Text(formatTime(item.timestamp))
+                                                            .font(.system(size: 10))
+                                                            .foregroundColor(.secondary)
+                                                        Spacer()
+                                                        if copiedIndex == index {
+                                                            Text("Скопировано!")
+                                                                .font(.system(size: 10, weight: .bold))
+                                                                .foregroundColor(Color.brandGreen)
+                                                        } else {
+                                                            Text("\(item.latencyMs)мс • \(item.provider)")
+                                                                .font(.system(size: 9))
+                                                                .foregroundColor(.secondary.opacity(0.7))
+                                                        }
+                                                    }
+
+                                                    Text(item.text)
+                                                        .font(.system(size: 12))
+                                                        .foregroundColor(.primary)
+                                                        .lineLimit(3)
+                                                        .multilineTextAlignment(.leading)
+                                                }
+                                                .padding(8)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(copiedIndex == index ? Color.brandGreen.opacity(0.12) : Color.primary.opacity(0.03))
+                                                .cornerRadius(8)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 220)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.brandCard)
+                    .cornerRadius(10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.brandBorder, lineWidth: 1)
+                    )
+                }
+
+                // Section 5: macOS System Permissions (Shown ONLY when permissions are missing)
                 if !allPermissionsGranted {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Требуются системные разрешения macOS")
@@ -293,9 +447,10 @@ struct SettingsView: View {
             }
             .padding(20)
         }
-        .frame(minWidth: 480, minHeight: 520)
+        .frame(minWidth: 480, minHeight: 560)
         .onAppear {
             googleApiKey = SecretStore.get(SecretStore.Account.googleApiKey) ?? ""
+            history.reload()
             checkPermissions()
             if !googleApiKey.isEmpty {
                 verifyGoogleKey()
@@ -353,6 +508,28 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private func copyToClipboard(_ text: String, at index: Int) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        withAnimation {
+            copiedIndex = index
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            if copiedIndex == index {
+                withAnimation {
+                    copiedIndex = nil
+                }
+            }
+        }
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     private func checkPermissions() {

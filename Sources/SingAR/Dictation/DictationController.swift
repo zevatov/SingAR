@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 
 /// Orchestrates real-time live typing dictation:
-/// hotkey → live microphone capture → real-time keystroke typing into active app → instant finish.
+/// hotkey → live microphone capture → real-time keystroke typing into active app → sub-second AI polish finish.
 final class DictationController {
 
     private let statusBar: StatusBarController
@@ -58,8 +58,11 @@ final class DictationController {
         hasLiveTyped = false
         logStage("recording", startedAt: recordingStartedAt)
 
+        // Smart Media Pause (only if media is actively playing)
         if settings.pauseMedia {
-            didPauseMedia = media.pauseBackgroundMedia()
+            media.pauseIfPlaying { [weak self] didPause in
+                self?.didPauseMedia = didPause
+            }
         }
 
         vad.reset()
@@ -76,7 +79,7 @@ final class DictationController {
 
         // Initialize engines
         localAsr = SpeechEngine()
-        if settings.cloudModel == .gemini35Transcribe && cloud.available {
+        if cloud.available {
             geminiAsr = GeminiLiveEngine()
         } else {
             geminiAsr = nil
@@ -141,38 +144,40 @@ final class DictationController {
 
             var finalText = self.processed(transcript)
 
-            // 2. Optional AI Post-Processing / Polish with Gemini
-            if self.settings.cloudCleanup && self.cloud.available,
-               let audioData = self.flattenAudio() {
-                if let polished = await self.cloud.cloudTranscribe(audio: audioData), !polished.isEmpty {
+            // 2. Ultra-Fast AI Polish (~150-250ms latency)
+            if self.settings.cloudCleanup && self.cloud.available && !finalText.isEmpty {
+                if let polished = await self.cloud.polish(text: finalText), !polished.isEmpty {
                     finalText = self.processed(polished)
                     provider = "gemini-live+polish"
                     model = "gemini-3.5-transcribe"
                 }
             }
 
+            let textToCommit = finalText
+            let recordedProvider = provider
+            let recordedModel = model
+
             await MainActor.run {
                 guard self.sessionGeneration == gen else { return }
                 self.logStage("transcribing", startedAt: transcribingStartedAt, completed: true)
 
                 if self.hasLiveTyped {
-                    // Smoothly update the live-typed text on screen with the polished text
-                    self.handleLivePartial(finalText)
-                } else if !finalText.isEmpty {
-                    // If live typing was bypassed, insert final text directly
+                    // Smoothly apply the final polished text to the screen
+                    self.applyPolishedText(textToCommit)
+                } else if !textToCommit.isEmpty {
                     self.statusBar.setStatus(.inserting)
                     self.indicator.setStatus(.inserting)
-                    self.injector.insert(finalText)
+                    self.injector.insert(textToCommit)
                 }
 
-                if !finalText.isEmpty {
+                if !textToCommit.isEmpty {
                     let latencyMs = Int(Date().timeIntervalSince(self.recordingStartedAt) * 1_000)
                     self.history.append(DictationHistoryEntry(
                         timestamp: Date(),
-                        provider: provider,
-                        model: model,
+                        provider: recordedProvider,
+                        model: recordedModel,
                         latencyMs: latencyMs,
-                        text: finalText
+                        text: textToCommit
                     ))
                 }
 
@@ -205,7 +210,7 @@ final class DictationController {
     // MARK: Real-time Live Typing Engine
 
     private func handleLivePartial(_ newText: String) {
-        guard isDictating || !hasLiveTyped else { return }
+        guard isDictating else { return }
         let cleaned = processed(newText)
         guard !cleaned.isEmpty, cleaned != lastLiveText else { return }
 
@@ -232,6 +237,33 @@ final class DictationController {
 
         lastLiveText = cleaned
         hasLiveTyped = true
+    }
+
+    /// Guaranteed application of polished text upon dictation finish
+    private func applyPolishedText(_ polished: String) {
+        guard !polished.isEmpty, polished != lastLiveText else { return }
+
+        let oldChars = Array(lastLiveText)
+        let newChars = Array(polished)
+
+        var commonPrefixLength = 0
+        while commonPrefixLength < oldChars.count &&
+              commonPrefixLength < newChars.count &&
+              oldChars[commonPrefixLength] == newChars[commonPrefixLength] {
+            commonPrefixLength += 1
+        }
+
+        let backspacesNeeded = oldChars.count - commonPrefixLength
+        let charsToType = String(newChars[commonPrefixLength...])
+
+        if backspacesNeeded > 0 {
+            injector.backspace(count: backspacesNeeded)
+        }
+        if !charsToType.isEmpty {
+            injector.typeText(charsToType)
+        }
+
+        lastLiveText = polished
     }
 
     // MARK: Focus Monitoring
@@ -266,23 +298,6 @@ final class DictationController {
             return commands.process(raw)
         }
         return raw
-    }
-
-    private func flattenAudio() -> Data? {
-        let buffers = audio.capturedBuffers
-        guard !buffers.isEmpty else { return nil }
-
-        let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("singar-session-\(UUID().uuidString).wav")
-        defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-        do {
-            try WAVWriter.write(buffers, to: tmpURL)
-            return try Data(contentsOf: tmpURL)
-        } catch {
-            NSLog("[SingAR] flattenAudio failed: \(error)")
-            return nil
-        }
     }
 
     private func finish() {

@@ -1,143 +1,123 @@
 import AppKit
 import SwiftUI
 
-/// Owns the menu bar status item with a combined Microphone glyph + live Status Dot (🟢/🟡/🔴),
-/// NSPopover with SwiftUI MenuBarView, and click handling.
-final class StatusBarController: NSObject {
+/// Manages the NSStatusItem in the macOS menu bar.
+/// Renders a crisp white monochrome microphone icon and a dynamic status dot (🟢 Ready / 🟡 Permissions / 🔴 Paused).
+final class StatusBarController {
 
     private let statusItem: NSStatusItem
-    private let popover: NSPopover
     private let settings = AppSettings.shared
-    private var status: AppStatus = .idle
-    private var permCheckTimer: Timer?
+    private(set) var status: AppStatus = .idle
+    private var popover: NSPopover?
+    private var eventMonitor: Any?
+    private var permissionsTimer: Timer?
 
-    /// Wired by AppDelegate so menu actions can open UI.
     var onOpenSettings: (() -> Void)?
-    var onOpenHistory: (() -> Void)?
     var onOpenOnboarding: (() -> Void)?
 
-    override init() {
+    init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        popover = NSPopover()
-        super.init()
-
-        popover.contentSize = NSSize(width: 280, height: 380)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: MenuBarView())
-
-        if let button = statusItem.button {
-            button.action = #selector(statusItemClicked(_:))
-            button.target = self
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
-
+        setupStatusItem()
         renderButton()
+        setupPermissionsObserver()
+    }
 
-        // Periodically refresh status dot in case permissions change in System Settings
-        permCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    deinit {
+        permissionsTimer?.invalidate()
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+        }
+    }
+
+    private func setupStatusItem() {
+        guard let button = statusItem.button else { return }
+        button.target = self
+        button.action = #selector(statusItemClicked(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    private func setupPermissionsObserver() {
+        // Poll permissions every 1s to reactively update the menu bar dot (🟡 -> 🟢)
+        permissionsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.renderButton()
         }
     }
 
-    deinit {
-        permCheckTimer?.invalidate()
-    }
+    // MARK: Actions
 
-    // MARK: Click handling (Left: Popover, Right: Context Menu)
-
-    @objc private func statusItemClicked(_ sender: Any?) {
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp {
-            showRightClickMenu()
+            toggleEnabled()
         } else {
-            togglePopover()
+            togglePopover(sender)
         }
     }
 
-    func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else if let button = statusItem.button {
-            NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    private func toggleEnabled() {
+        withAnimation {
+            settings.enabled.toggle()
+        }
+        renderButton(animated: true)
+    }
+
+    private func togglePopover(_ sender: NSStatusBarButton) {
+        if let popover, popover.isShown {
+            closePopover()
+        } else {
+            showPopover(sender)
         }
     }
 
-    private func showRightClickMenu() {
-        let menu = NSMenu()
+    private func showPopover(_ sender: NSStatusBarButton) {
+        DictationHistory.shared.reload()
+        let pop = NSPopover()
+        pop.contentSize = NSSize(width: 290, height: 280)
+        pop.behavior = .transient
+        pop.contentViewController = NSHostingController(rootView: MenuBarView())
+        self.popover = pop
 
-        let titleItem = NSMenuItem(title: "SingAR (Gemini 3.5)", action: nil, keyEquivalent: "")
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
-        menu.addItem(.separator())
+        pop.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        sender.window?.makeKey()
 
-        let enabledItem = NSMenuItem(
-            title: settings.enabled ? "Поставить на паузу" : "Возобновить работу",
-            action: #selector(toggleEnabled),
-            keyEquivalent: ""
-        )
-        enabledItem.target = self
-        menu.addItem(enabledItem)
-
-        let settingsItem = NSMenuItem(title: "Настройки...", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        let onboardingItem = NSMenuItem(title: "Разрешения...", action: #selector(openOnboarding), keyEquivalent: "")
-        onboardingItem.target = self
-        menu.addItem(onboardingItem)
-
-        menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(title: "Выход", action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = nil // Reset so left-click continues opening popover
-    }
-
-    @objc private func toggleEnabled() {
-        settings.enabled.toggle()
-        renderButton()
-    }
-
-    @objc private func openSettings() {
-        DispatchQueue.main.async {
-            WindowManager.shared.showSettings()
+        // Global click-outside monitor
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.closePopover()
         }
     }
 
-    @objc private func openOnboarding() {
-        DispatchQueue.main.async {
-            WindowManager.shared.showOnboarding()
+    private func closePopover() {
+        popover?.performClose(nil)
+        popover = nil
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
         }
     }
 
-    @objc private func quitApp() {
-        NSApp.terminate(nil)
-    }
+    // MARK: Status Updates
 
-    // MARK: Public API
-
-    func setStatus(_ status: AppStatus) {
-        self.status = status
+    func setStatus(_ newStatus: AppStatus) {
+        guard status != newStatus else { return }
+        status = newStatus
         renderButton(animated: true)
     }
 
     func flashStatus() {
-        DispatchQueue.main.async { [weak self] in
-            guard let button = self?.statusItem.button else { return }
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.2
-                button.animator().contentTintColor = .systemRed
+        guard let button = statusItem.button else { return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.15
+            button.alphaValue = 0.2
+        }, completionHandler: {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.15
+                button.alphaValue = 1.0
             }, completionHandler: {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                     self?.renderButton(animated: true)
                 }
             })
-        }
+        })
     }
 
     var statusItemButtonFrame: NSRect? {
@@ -164,17 +144,26 @@ final class StatusBarController: NSObject {
                 dotColor = .systemGreen     // 🟢 Active & Ready
             }
 
-            // 2. Microphone Glyph
+            // 2. Microphone Glyph Styling
+            let isDark = (UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark")
+                || (button.window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+                || (NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            let baseColor: NSColor = isDark ? .white : NSColor(white: 0.1, alpha: 1.0)
+            let activeColor = (self.status != .idle && isEnabled) ? self.status.color : baseColor
+
             let symbolName = isEnabled ? self.status.symbol : "mic.slash"
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            let colorConfig = NSImage.SymbolConfiguration(paletteColors: [activeColor])
+            let finalConfig = config.applying(colorConfig)
+
             guard let glyph = NSImage(systemSymbolName: symbolName, accessibilityDescription: self.status.tooltip)?
-                .withSymbolConfiguration(config) else { return }
+                .withSymbolConfiguration(finalConfig) else { return }
 
             let totalWidth: CGFloat = 28
             let totalHeight: CGFloat = 18
 
             let combinedImage = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
-                // Draw Microphone icon on the left (white/template by default)
+                // Draw Microphone icon on the left
                 let glyphRect = NSRect(
                     x: 0,
                     y: (totalHeight - glyph.size.height) / 2,
@@ -182,15 +171,16 @@ final class StatusBarController: NSObject {
                     height: glyph.size.height
                 )
 
-                if self.status != .idle && isEnabled {
-                    self.status.color.set()
-                    glyph.draw(in: glyphRect)
+                // High-precision mask fill to guarantee pure white in dark mode
+                if let cgImage = glyph.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    let ctx = NSGraphicsContext.current?.cgContext
+                    ctx?.saveGState()
+                    ctx?.clip(to: glyphRect, mask: cgImage)
+                    activeColor.setFill()
+                    ctx?.fill(glyphRect)
+                    ctx?.restoreGState()
                 } else {
-                    let isDark = (UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark")
-                        || (button.window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
-                        || (NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
-                    let baseColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
-                    baseColor.set()
+                    activeColor.set()
                     glyph.draw(in: glyphRect)
                 }
 
