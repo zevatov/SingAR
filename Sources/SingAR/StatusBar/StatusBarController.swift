@@ -72,8 +72,9 @@ final class StatusBarController {
     private func showPopover(_ sender: NSStatusBarButton) {
         DictationHistory.shared.reload()
         let pop = NSPopover()
-        pop.contentSize = NSSize(width: 290, height: 280)
+        pop.contentSize = NSSize(width: 290, height: 420)
         pop.behavior = .transient
+        pop.animates = true
         pop.contentViewController = NSHostingController(rootView: MenuBarView())
         self.popover = pop
 

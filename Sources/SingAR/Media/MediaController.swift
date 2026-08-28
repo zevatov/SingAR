@@ -27,7 +27,7 @@ final class MediaController {
             completion(false)
             return
         }
-        typealias FnGetIsPlaying = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
+        typealias FnGetIsPlaying = @convention(c) (DispatchQueue, @convention(block) @escaping (Bool) -> Void) -> Void
         let fn = unsafeBitCast(getIsPlaying, to: FnGetIsPlaying.self)
         fn(DispatchQueue.main, completion)
     }
