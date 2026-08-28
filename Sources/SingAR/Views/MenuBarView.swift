@@ -101,7 +101,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            // Interactive Hotkey & Mode Configuration (Clean single chevron)
+            // Interactive Hotkey & Mode Configuration
             VStack(spacing: 8) {
                 // Hotkey Switcher
                 HStack {
@@ -172,7 +172,7 @@ struct MenuBarView: View {
                     } else {
                         ScrollView {
                             VStack(spacing: 5) {
-                                ForEach(Array(entries.enumerated()), id: \.offset) { index, item in
+                                ForEach(Array(entries.enumerated()), id: \.element.id) { index, item in
                                     Button {
                                         copyToClipboard(item.text, at: index)
                                     } label: {
@@ -207,8 +207,9 @@ struct MenuBarView: View {
                                     .buttonStyle(.plain)
                                 }
                             }
+                            .padding(.vertical, 2)
                         }
-                        .frame(maxHeight: 140)
+                        .frame(minHeight: 90, maxHeight: 170)
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -234,7 +235,10 @@ struct MenuBarView: View {
                 .cornerRadius(6)
 
                 Button {
-                    WindowManager.shared.showSettings()
+                    DispatchQueue.main.async {
+                        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
+                        WindowManager.shared.showSettings()
+                    }
                 } label: {
                     Label("Настройки", systemImage: "gearshape")
                         .font(.system(size: 11, weight: .medium))

@@ -10,11 +10,11 @@ final class WindowManager: ObservableObject {
 
     @MainActor
     func showSettings() {
+        NSApp.activate(ignoringOtherApps: true)
         if let window = settingsWindow {
             window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
             window.makeKey()
-            NSApp.activate(ignoringOtherApps: true)
             return
         }
 
@@ -35,7 +35,9 @@ final class WindowManager: ObservableObject {
         window.titleVisibility = .visible
 
         self.settingsWindow = window
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+        window.makeKey()
         NSApp.activate(ignoringOtherApps: true)
 
         NotificationCenter.default.addObserver(
@@ -54,9 +56,11 @@ final class WindowManager: ObservableObject {
 
     @MainActor
     func showOnboarding() {
+        NSApp.activate(ignoringOtherApps: true)
         if let window = onboardingWindow {
+            window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
             return
         }
 
@@ -64,18 +68,22 @@ final class WindowManager: ObservableObject {
         let hostingView = NSHostingView(rootView: onboardingView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "SingAR — Разрешения"
+        window.title = "Добро пожаловать в SingAR"
         window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .visible
 
         self.onboardingWindow = window
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+        window.makeKey()
         NSApp.activate(ignoringOtherApps: true)
 
         NotificationCenter.default.addObserver(
@@ -88,7 +96,7 @@ final class WindowManager: ObservableObject {
 
     @MainActor
     func closeOnboarding() {
-        onboardingWindow?.close()
+        onboardingWindow?.performClose(nil)
         onboardingWindow = nil
     }
 
@@ -103,8 +111,6 @@ final class WindowManager: ObservableObject {
         if historyWindowController == nil {
             historyWindowController = HistoryWindow()
         }
-        historyWindowController?.showWindow(nil)
-        historyWindowController?.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        historyWindowController?.show()
     }
 }
