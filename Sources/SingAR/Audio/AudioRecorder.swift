@@ -1,7 +1,8 @@
 import AVFoundation
 
 /// Captures microphone audio via AVAudioEngine and delivers 16 kHz mono
-/// Float32 PCM buffers to a callback — the format whisper.cpp expects.
+/// Float32 PCM buffers to a callback — the format SFSpeechRecognizer and the
+/// cloud WAV path both consume directly.
 final class AudioRecorder {
 
     private let engine = AVAudioEngine()
@@ -16,6 +17,14 @@ final class AudioRecorder {
 
     func start(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
         guard !isRunning else { return }
+        // Reset captured audio for the cloud pass: without this, buffers from
+        // every previous dictation accumulate across sessions, so the cloud
+        // pass would transcribe a concatenation of all past dictations and
+        // return stale text (the "erases and inserts past messages" bug).
+        // Cleared here, NOT in stop — the cloud pass reads capturedBuffers
+        // after stop; only a fresh start can safely drop them (by then the
+        // previous cloud pass already holds its own immutable Data copy).
+        capturedBuffers.removeAll()
         self.onBuffer = onBuffer
 
         let inputNode = engine.inputNode
@@ -31,6 +40,7 @@ final class AudioRecorder {
         do {
             try engine.start()
             isRunning = true
+            NSLog("[SingAR] 🎤 AVAudioEngine started — capturing mic")
         } catch {
             NSLog("[SingAR] AVAudioEngine start failed: \(error)")
         }

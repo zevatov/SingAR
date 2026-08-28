@@ -1,182 +1,159 @@
 import Foundation
 import CoreGraphics
+import Combine
 
-/// All user-tunable options exposed through the menu bar. Values persist in
-/// UserDefaults and drive every subsystem (audio, ASR, injection, media, cloud).
-enum DictationMode: String, CaseIterable {
-    case hold
-    case toggle
-    var title: String { self == .hold ? "Hold-to-talk" : "Toggle" }
+/// Human-readable menu/segment title for an enum shown in the menu or settings.
+protocol MenuTitled {
+    var title: String { get }
 }
 
-/// Which key triggers dictation. Fn/Globe is the natural Apple-dictation slot,
-/// but Apple grabs it at the HID level while its dictation is enabled — so we
-/// offer right-Option as an alternate that Apple never intercepts.
-enum HotkeyChoice: String, CaseIterable {
-    case fnOrGlobe
+/// All user-tunable options. Values persist in UserDefaults and drive subsystems.
+enum DictationMode: String, CaseIterable, MenuTitled {
+    case hold
+    case toggle
+    var title: String { self == .hold ? "Hold-to-talk (удержание)" : "Toggle (нажал-сказал-нажал)" }
+}
+
+/// Which key triggers dictation.
+enum HotkeyChoice: String, CaseIterable, MenuTitled {
     case rightOption
+    case fnOrGlobe
     var title: String {
         switch self {
-        case .fnOrGlobe:  return "Fn / Globe (нужно отключить Apple-диктовку)"
-        case .rightOption: return "Правый ⌥ Option (работает всегда)"
+        case .rightOption: return "Правый ⌥ Option (рекоменд.)"
+        case .fnOrGlobe:  return "Fn / Globe (требует отключить Apple-диктовку)"
         }
     }
     /// CGKeyCode for this trigger.
     var keyCode: CGKeyCode {
         switch self {
-        case .fnOrGlobe:  return 63   // Fn / Globe
         case .rightOption: return 61  // Right Option
+        case .fnOrGlobe:  return 63   // Fn / Globe
         }
     }
 }
 
-enum MediaPauseMode: String, CaseIterable {
-    case pause
-    case duck
-    var title: String { self == .pause ? "Полная пауза" : "Приглушить (duck)" }
-}
+/// Cloud speech recognition backend.
+/// Google Gemini 3.5 Transcribe is the flagship model with 2.6% WER and native code/punctuation awareness.
+enum CloudModel: String, CaseIterable, MenuTitled {
+    case gemini35Transcribe = "google/gemini-3.5-transcribe"      // Flagship, 2.6% WER, code aware
+    case gpt4oTranscribe    = "openai/gpt-4o-transcribe"         // Legacy fallback
+    case localOnly          = "local/apple-speech"               // Offline on-device only
 
-enum CloudStep: String, CaseIterable {
-    case off
-    case reASR
-    case llmPolish
     var title: String {
         switch self {
-        case .off:      return "Off"
-        case .reASR:    return "Re-ASR (GPT-4o-mini)"
-        case .llmPolish: return "LLM-polish (Qwen3-Max)"
+        case .gemini35Transcribe: return "Google Gemini 3.5 Transcribe (Бесплатно / Быстро)"
+        case .gpt4oTranscribe:    return "GPT-4o Transcribe (OpenRouter)"
+        case .localOnly:          return "Только локально (Apple Speech, без сети)"
         }
     }
 }
 
-/// Which re-ASR model OpenRouter transcribes with. Ranked for vibe-coding.
-enum ReASRModel: String, CaseIterable {
-    case gpt4oMini = "openai/gpt-4o-mini-transcribe"   // best code/path recognition, ~1s, ~$0.00012
-    case gpt4o     = "openai/gpt-4o-transcribe"        // premium, perfect slash-paths, 2× cost
-    case turbo     = "openai/whisper-large-v3-turbo"   // budget, 0.46s, ~$0.00011
-    case whisper3  = "openai/whisper-large-v3"
-    case voxtral   = "mistralai/voxtral-mini-transcribe"
+enum ASRLanguage: String, CaseIterable, MenuTitled {
+    case auto
+    case ru
+    case en
+
     var title: String {
         switch self {
-        case .gpt4oMini: return "GPT-4o-mini-transcribe (recommended)"
-        case .gpt4o:     return "GPT-4o-transcribe (premium)"
-        case .turbo:     return "Whisper large-v3-turbo (fast/budget)"
-        case .whisper3:  return "Whisper large-v3"
-        case .voxtral:   return "Voxtral mini-transcribe"
+        case .auto: return "Авто (RU / EN)"
+        case .ru:   return "Русский (RU)"
+        case .en:   return "English (EN)"
         }
     }
 }
 
-enum ASRLanguage: String, CaseIterable {
-    case auto, ru, en
-    var title: String { self == .auto ? "Auto" : rawValue.uppercased() }
-}
-
-enum ASRModel: String, CaseIterable {
-    case turbo
-    case large
-    var title: String { self == .turbo ? "large-v3-turbo" : "large-v3" }
-}
-
-final class AppSettings {
+final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     private let defaults = UserDefaults.standard
 
-    /// Fired on any change so the menu / subsystems can refresh.
+    /// Fired on any change so external controllers can refresh.
     var onChange: (() -> Void)?
 
     private enum Key {
-        static let enabled        = "enabled"
-        static let mode           = "mode"
-        static let hotkey         = "hotkey"
+        static let enabled         = "enabled"
+        static let mode            = "mode"
+        static let hotkey          = "hotkey"
         static let autoPunctuation = "autoPunctuation"
-        static let voiceCommands  = "voiceCommands"
-        static let livePartials   = "livePartials"
-        static let pauseMedia     = "pauseMedia"
-        static let mediaMode      = "mediaMode"
-        static let cloudStep      = "cloudStep"
-        static let reASRModel     = "reASRModel"
-        static let language       = "language"
-        static let model          = "model"
-        static let launchAtLogin  = "launchAtLogin"
+        static let voiceCommands   = "voiceCommands"
+        static let livePartials    = "livePartials"
+        static let pauseMedia      = "pauseMedia"
+        static let cloudCleanup    = "cloudCleanup"
+        static let cloudModel      = "cloudModel"
+        static let language        = "language"
+        static let launchAtLogin   = "launchAtLogin"
+    }
+
+    // MARK: Bool toggles
+
+    @Published var enabled: Bool {
+        didSet { defaults.set(enabled, forKey: Key.enabled); fire() }
+    }
+    @Published var autoPunctuation: Bool {
+        didSet { defaults.set(autoPunctuation, forKey: Key.autoPunctuation); fire() }
+    }
+    @Published var voiceCommands: Bool {
+        didSet { defaults.set(voiceCommands, forKey: Key.voiceCommands); fire() }
+    }
+    @Published var livePartials: Bool {
+        didSet { defaults.set(livePartials, forKey: Key.livePartials); fire() }
+    }
+    @Published var pauseMedia: Bool {
+        didSet { defaults.set(pauseMedia, forKey: Key.pauseMedia); fire() }
+    }
+    @Published var launchAtLogin: Bool {
+        didSet { defaults.set(launchAtLogin, forKey: Key.launchAtLogin); fire() }
+    }
+    @Published var cloudCleanup: Bool {
+        didSet { defaults.set(cloudCleanup, forKey: Key.cloudCleanup); fire() }
+    }
+
+    // MARK: Enum options
+
+    @Published var mode: DictationMode {
+        didSet { defaults.set(mode.rawValue, forKey: Key.mode); fire() }
+    }
+    @Published var hotkey: HotkeyChoice {
+        didSet { defaults.set(hotkey.rawValue, forKey: Key.hotkey); fire() }
+    }
+    @Published var cloudModel: CloudModel {
+        didSet { defaults.set(cloudModel.rawValue, forKey: Key.cloudModel); fire() }
+    }
+    @Published var language: ASRLanguage {
+        didSet { defaults.set(language.rawValue, forKey: Key.language); fire() }
     }
 
     private init() {
         defaults.register(defaults: [
             Key.enabled:         true,
-            Key.mode:            DictationMode.hold.rawValue,
+            Key.mode:            DictationMode.toggle.rawValue,
             Key.hotkey:          HotkeyChoice.rightOption.rawValue,
             Key.autoPunctuation: true,
             Key.voiceCommands:   true,
             Key.livePartials:    true,
             Key.pauseMedia:      true,
-            Key.mediaMode:       MediaPauseMode.pause.rawValue,
-            Key.cloudStep:       CloudStep.off.rawValue,
-            Key.reASRModel:      ReASRModel.gpt4oMini.rawValue,
+            Key.cloudCleanup:    true,
+            Key.cloudModel:      CloudModel.gemini35Transcribe.rawValue,
             Key.language:        ASRLanguage.auto.rawValue,
-            Key.model:           ASRModel.turbo.rawValue,
             Key.launchAtLogin:   false,
         ])
+
+        self.enabled = defaults.bool(forKey: Key.enabled)
+        self.autoPunctuation = defaults.bool(forKey: Key.autoPunctuation)
+        self.voiceCommands = defaults.bool(forKey: Key.voiceCommands)
+        self.livePartials = defaults.bool(forKey: Key.livePartials)
+        self.pauseMedia = defaults.bool(forKey: Key.pauseMedia)
+        self.launchAtLogin = defaults.bool(forKey: Key.launchAtLogin)
+        self.cloudCleanup = defaults.object(forKey: Key.cloudCleanup) as? Bool ?? true
+
+        self.mode = DictationMode(rawValue: defaults.string(forKey: Key.mode) ?? "") ?? .toggle
+        self.hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption
+        self.cloudModel = CloudModel(rawValue: defaults.string(forKey: Key.cloudModel) ?? "") ?? .gemini35Transcribe
+        self.language = ASRLanguage(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .auto
     }
 
-    // MARK: Bool toggles
-
-    var enabled: Bool {
-        get { defaults.bool(forKey: Key.enabled) }
-        set { defaults.set(newValue, forKey: Key.enabled); fire() }
+    private func fire() {
+        onChange?()
     }
-    var autoPunctuation: Bool {
-        get { defaults.bool(forKey: Key.autoPunctuation) }
-        set { defaults.set(newValue, forKey: Key.autoPunctuation); fire() }
-    }
-    var voiceCommands: Bool {
-        get { defaults.bool(forKey: Key.voiceCommands) }
-        set { defaults.set(newValue, forKey: Key.voiceCommands); fire() }
-    }
-    var livePartials: Bool {
-        get { defaults.bool(forKey: Key.livePartials) }
-        set { defaults.set(newValue, forKey: Key.livePartials); fire() }
-    }
-    var pauseMedia: Bool {
-        get { defaults.bool(forKey: Key.pauseMedia) }
-        set { defaults.set(newValue, forKey: Key.pauseMedia); fire() }
-    }
-    var launchAtLogin: Bool {
-        get { defaults.bool(forKey: Key.launchAtLogin) }
-        set { defaults.set(newValue, forKey: Key.launchAtLogin); fire() }
-    }
-
-    // MARK: Enum options
-
-    var mode: DictationMode {
-        get { DictationMode(rawValue: defaults.string(forKey: Key.mode) ?? "") ?? .hold }
-        set { defaults.set(newValue.rawValue, forKey: Key.mode); fire() }
-    }
-    var hotkey: HotkeyChoice {
-        get { HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption }
-        set { defaults.set(newValue.rawValue, forKey: Key.hotkey); fire() }
-    }
-    var mediaMode: MediaPauseMode {
-        get { MediaPauseMode(rawValue: defaults.string(forKey: Key.mediaMode) ?? "") ?? .pause }
-        set { defaults.set(newValue.rawValue, forKey: Key.mediaMode); fire() }
-    }
-    var cloudStep: CloudStep {
-        get { CloudStep(rawValue: defaults.string(forKey: Key.cloudStep) ?? "") ?? .off }
-        set { defaults.set(newValue.rawValue, forKey: Key.cloudStep); fire() }
-    }
-    var language: ASRLanguage {
-        get { ASRLanguage(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .auto }
-        set { defaults.set(newValue.rawValue, forKey: Key.language); fire() }
-    }
-    var model: ASRModel {
-        get { ASRModel(rawValue: defaults.string(forKey: Key.model) ?? "") ?? .turbo }
-        set { defaults.set(newValue.rawValue, forKey: Key.model); fire() }
-    }
-    var reASRModel: ReASRModel {
-        get { ReASRModel(rawValue: defaults.string(forKey: Key.reASRModel) ?? "") ?? .gpt4oMini }
-        set { defaults.set(newValue.rawValue, forKey: Key.reASRModel); fire() }
-    }
-
-    private func fire() { onChange?() }
 }

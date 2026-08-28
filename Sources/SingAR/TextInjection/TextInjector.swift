@@ -1,16 +1,47 @@
 import AppKit
 
-/// Pastes text into the focused app via the pasteboard + a synthesized Cmd+V.
-/// Robust across all apps and scripts; handles Cyrillic without IME quirks.
-/// Preserves the user's existing pasteboard contents around the paste.
+/// Injects text into the focused app. Two modes:
+///   - `typeText(_:)` — keystroke-by-keystroke via CGEvent (fast, live-typing feel)
+///   - `insert(_:)` — pasteboard + Cmd+V (for final, multi-line, or non-ASCII)
+/// Plus `backspace(count:)` to erase a previously-typed partial.
 final class TextInjector {
 
     private let pasteboard = NSPasteboard.general
 
+    /// Type a string character-by-character. Each char becomes a keyDown/keyUp
+    /// pair, so the text appears live in the field as if the user typed it.
+    func typeText(_ text: String) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for char in text {
+            // Use the Unicode-aware key event path: post a keyDown with the
+            // character attached. This handles Latin, Cyrillic, punctuation.
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            // Set the Unicode string on the keyDown event.
+            var chars = Array(String(char).utf16)
+            down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+        }
+    }
+
+    /// Press Backspace `count` times to erase previously-typed text.
+    func backspace(count: Int) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        // 0x33 = Delete/Backspace key code.
+        for _ in 0..<count {
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+        }
+    }
+
+    /// Paste text via the pasteboard + Cmd+V. Used for final results, multiline,
+    /// or when typeText isn't suitable. Preserves the user's clipboard.
     func insert(_ text: String) {
         guard !text.isEmpty else { return }
 
-        // Snapshot whatever the user currently has on the pasteboard.
         let savedItems = pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
             var dict: [NSPasteboard.PasteboardType: Data] = [:]
             for type in item.types {
@@ -25,7 +56,6 @@ final class TextInjector {
         pasteboard.setString(text, forType: .string)
         postPaste()
 
-        // Restore the user's clipboard shortly after, once the paste has landed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [savedItems] in
             self.pasteboard.clearContents()
             for dict in savedItems {
@@ -38,13 +68,10 @@ final class TextInjector {
         }
     }
 
-    /// Insert text, replacing any current selection in the focused field first
-    /// (Apple-dictation style: selected text is overwritten by the transcript).
+    /// Insert text, replacing any current selection first (Apple-dictation style).
     func insertReplacingSelection(_ text: String) {
         guard !text.isEmpty else { return }
-        // Clear the selection with Delete, then paste. This replaces whatever
-        // was highlighted without disturbing the surrounding text.
-        postKey(virtualKey: 0x33, flags: []) // Delete
+        postKey(virtualKey: 0x33, flags: [])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
             self?.insert(text)
         }
@@ -52,8 +79,8 @@ final class TextInjector {
 
     private func postPaste() {
         let source = CGEventSource(stateID: .hidSystemState)
-        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)  // Cmd
-        let vDown   = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)  // V
+        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)
+        let vDown   = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
         let vUp     = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
         let cmdUp   = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: false)
         vDown?.flags = .maskCommand
@@ -64,7 +91,6 @@ final class TextInjector {
         cmdUp?.post(tap: .cghidEventTap)
     }
 
-    /// Post a single key event with optional modifier flags.
     private func postKey(virtualKey: CGKeyCode, flags: CGEventFlags) {
         let source = CGEventSource(stateID: .hidSystemState)
         let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true)

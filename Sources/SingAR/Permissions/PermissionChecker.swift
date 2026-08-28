@@ -2,10 +2,8 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import IOKit.hid
+import Speech
 
-/// Centralised permission state. Each permission exposes a status + a way to
-/// open the relevant System Settings pane so the onboarding window can guide
-/// the user through them step by step.
 enum PermissionStatus: String {
     case granted
     case denied
@@ -15,21 +13,21 @@ enum PermissionStatus: String {
 enum PermissionKind: CaseIterable {
     case microphone
     case accessibility
-    case inputMonitoring
+    case speechRecognition
 
     var title: String {
         switch self {
-        case .microphone:       return "Микрофон"
-        case .accessibility:    return "Accessibility"
-        case .inputMonitoring:  return "Input Monitoring"
+        case .microphone:          return "Микрофон"
+        case .accessibility:       return "Универсальный доступ"
+        case .speechRecognition:   return "Распознавание речи"
         }
     }
 
     var why: String {
         switch self {
-        case .microphone:       return "нужен для записи речи"
-        case .accessibility:    return "нужен для хоткея и вставки текста (Cmd+V)"
-        case .inputMonitoring:  return "нужен для перехвата клавиши Fn/Globe"
+        case .microphone:          return "нужен для захвата речи с микрофона"
+        case .accessibility:       return "нужен для глобального хоткея и вставки текста (Cmd+V)"
+        case .speechRecognition:   return "нужно для локальной live-транскрипции"
         }
     }
 
@@ -39,8 +37,8 @@ enum PermissionKind: CaseIterable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         case .accessibility:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        case .inputMonitoring:
-            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        case .speechRecognition:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
         }
     }
 }
@@ -50,81 +48,90 @@ final class PermissionChecker {
     static let shared = PermissionChecker()
     private init() {}
 
-    /// Current status of each permission — uses the correct API per kind.
+    /// Current live status of each permission.
     func status(of kind: PermissionKind) -> PermissionStatus {
         switch kind {
         case .microphone:
-            // AVCaptureDevice.authorizationStatus is the live, reliable check.
-            switch AVCaptureDevice.authorizationStatus(for: .audio) {
-            case .authorized:  return .granted
-            case .denied:      return .denied
-            case .notDetermined, .restricted: return .unknown
-            @unknown default:  return .unknown
+            if #available(macOS 14.0, *) {
+                switch AVAudioApplication.shared.recordPermission {
+                case .granted:       return .granted
+                case .denied:        return .denied
+                case .undetermined:  return .unknown
+                @unknown default:    return .unknown
+                }
+            } else {
+                switch AVCaptureDevice.authorizationStatus(for: .audio) {
+                case .authorized:    return .granted
+                case .denied:        return .denied
+                case .notDetermined, .restricted: return .unknown
+                @unknown default:    return .unknown
+                }
             }
         case .accessibility:
-            // AXIsProcessTrusted() does a live check (no prompt). Returns true
-            // as soon as the user toggles the switch in System Settings.
-            return AXIsProcessTrusted() ? .granted : .unknown
-        case .inputMonitoring:
-            // IOHIDCheckAccess is the real Input Monitoring check — distinct
-            // from Accessibility. kIOHIDRequestTypeListenEvent = 0.
-            let result = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-            switch result {
-            case kIOHIDAccessTypeGranted:       return .granted
-            case kIOHIDAccessTypeDenied:        return .denied
-            case kIOHIDAccessTypeUnknown:       return .unknown
-            default:                            return .unknown
+            return AXIsProcessTrusted() ? .granted : .denied
+        case .speechRecognition:
+            switch SFSpeechRecognizer.authorizationStatus() {
+            case .authorized:                   return .granted
+            case .denied:                       return .denied
+            case .notDetermined, .restricted:   return .unknown
+            @unknown default:                   return .unknown
             }
         }
     }
 
-    /// True only when all permissions are granted.
+    /// True only when all required permissions are granted.
     var allGranted: Bool {
         PermissionKind.allCases.allSatisfy { status(of: $0) == .granted }
     }
 
-    /// Request microphone permission (triggers the system prompt once).
-    func requestMicrophone() {
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
-    }
-
-    /// Request accessibility (shows the system prompt once; user must toggle
-    /// the switch in System Settings).
-    func requestAccessibility() {
-        _ = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-        )
-    }
-
-    /// Request input monitoring (triggers the system prompt; user must toggle
-    /// the switch in System Settings).
-    func requestInputMonitoring() {
-        // IOHIDRequestAccess prompts the user (macOS 10.15+). kIOHIDRequestTypeListenEvent = 0.
-        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-    }
-
-    /// Open the System Settings pane for a permission.
-    func openSettings(for kind: PermissionKind) {
-        if let url = kind.settingsURL {
-            NSWorkspace.shared.open(url)
+    func request(_ kind: PermissionKind) {
+        switch kind {
+        case .microphone:        requestMicrophone()
+        case .accessibility:     requestAccessibility()
+        case .speechRecognition: requestSpeechRecognition()
         }
     }
 
-    // MARK: Apple dictation conflict
-
-    /// True when Apple's built-in dictation is enabled — it grabs Fn/Globe at the
-    /// HID level, before our CGEventTap can see it, so SingAR's hotkey can't win
-    /// against it. The user must disable Apple dictation (or use an alternate key).
-    var appleDictationEnabled: Bool {
-        UserDefaults.standard.integer(forKey: "AppleDictationAutoEnable") == 1
-            // The HIToolbox default is what actually controls the Fn/Globe binding.
-            || (UserDefaults(suiteName: nil)?.integer(forKey: "AppleDictationAutoEnable") ?? 0) == 1
+    /// Request microphone permission (triggers system prompt or opens settings if denied).
+    func requestMicrophone() {
+        if #available(macOS 14.0, *) {
+            if AVAudioApplication.shared.recordPermission == .undetermined {
+                AVAudioApplication.requestRecordPermission { _ in }
+            } else {
+                openSettings(for: .microphone)
+            }
+        } else {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            if status == .notDetermined {
+                AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            } else {
+                openSettings(for: .microphone)
+            }
+        }
     }
 
-    /// Open System Settings → Keyboard → Dictation so the user can disable Apple
-    /// dictation and free up Fn/Globe for SingAR.
-    func openAppleDictationSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation") {
+    /// Request accessibility (triggers system prompt or opens Settings).
+    func requestAccessibility() {
+        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        if !trusted {
+            openSettings(for: .accessibility)
+        }
+    }
+
+    /// Request speech recognition.
+    func requestSpeechRecognition() {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        if status == .notDetermined {
+            SFSpeechRecognizer.requestAuthorization { _ in }
+        } else {
+            openSettings(for: .speechRecognition)
+        }
+    }
+
+    /// Open the System Settings pane for a specific permission.
+    func openSettings(for kind: PermissionKind) {
+        if let url = kind.settingsURL {
             NSWorkspace.shared.open(url)
         }
     }

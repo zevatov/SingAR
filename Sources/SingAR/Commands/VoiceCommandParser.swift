@@ -27,7 +27,19 @@ final class VoiceCommandParser {
 
     /// Returns the number of words consumed (0 = no command, emit raw word).
     private func matchCommand(at index: Int, in words: [String], appendTo output: inout String) -> Int {
-        // Two-word commands first.
+        // Longest phrases first: a 3-word command must be tried before its 2- or
+        // 1-word prefixes, otherwise "точка с запятой" matches "точка" → "." and
+        // leaves "с запятой" as raw text.
+        if index + 2 < words.count {
+            let triple = "\(words[index]) \(words[index + 1]) \(words[index + 2])".lowercased()
+            switch triple {
+            case "точка с запятой":
+                output += ";"
+                return 3
+            default: break
+            }
+        }
+
         if index + 1 < words.count {
             let pair = "\(words[index]) \(words[index + 1])".lowercased()
             switch pair {
@@ -35,9 +47,19 @@ final class VoiceCommandParser {
             case "new line", "next line", "новая строка", "новую строку":
                 output += "\n"
                 return 2
-            // Apple: "numeral" / "number" prefixes
-            case "numeral", "number":
-                return 2 // marker only; numeral handling left to ASR
+            // Apple punctuation (two-word phrasings — these sat in the one-word
+            // switch before and never matched, since `w` is a single word).
+            case "question mark", "вопросительный знак":
+                output += "?"
+                return 2
+            case "exclamation mark", "восклицательный знак":
+                output += "!"
+                return 2
+            case "all caps", "все заглавные":
+                return 2 // marker; full impl toggles caps for the following word
+            case "нижнее подчёркивание", "нижнее подчеркивание":
+                output += "_"
+                return 2
             default:
                 break
             }
@@ -45,27 +67,24 @@ final class VoiceCommandParser {
 
         let w = words[index].lowercased()
         switch w {
-        // Apple set
+        // Apple set (single-word phrasings).
         case "period", "точка":
             output += "."
             return 1
         case "comma", "запятая":
             output += ","
             return 1
-        case "question mark", "вопросительный знак":
-            output += "?"
-            return 1
-        case "exclamation mark", "восклицательный знак":
-            output += "!"
-            return 1
         case "colon", "двоеточие":
             output += ":"
             return 1
-        case "semicolon", "точка с запятой":
+        case "semicolon":
             output += ";"
             return 1
-        case "all caps", "все заглавные":
-            return 1 // marker; full impl toggles caps for following word
+        // Apple numeral/number markers — single words (they were in the two-word
+        // block before, compared as a pair, so never matched). Marker only;
+        // numeral conversion is left to the ASR.
+        case "numeral", "number":
+            return 1
         // Coding commands
         case "indent", "отступ":
             output += "\t"
@@ -78,7 +97,7 @@ final class VoiceCommandParser {
             return 1
         case "snakecase", "snake_case", "снейккейс":
             return 1
-        case "underscore", "подчёркивание":
+        case "underscore", "подчёркивание", "подчеркивание":
             output += "_"
             return 1
         // Raw word

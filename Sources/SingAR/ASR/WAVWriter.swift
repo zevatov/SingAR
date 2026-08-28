@@ -1,6 +1,6 @@
 import AVFoundation
 
-/// Writes a sequence of 16 kHz mono Float32 PCM buffers to a WAV file.
+/// Writes and converts 16 kHz mono Float32 PCM buffers to WAV files or raw 16-bit PCM bytes.
 enum WAVWriter {
     static func write(_ buffers: [AVAudioPCMBuffer], to url: URL) throws {
         guard let format = buffers.first?.format else {
@@ -17,11 +17,27 @@ enum WAVWriter {
         ]
         let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatInt16, interleaved: false)
         for buffer in buffers {
-            // Convert Float32 → Int16 in the file's common format.
             if let converted = convertToInt16(buffer) {
                 try file.write(from: converted)
             }
         }
+    }
+
+    /// Converts Float32 PCM buffer into raw 16-bit Linear PCM Data (for Gemini Live WebSocket).
+    static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data? {
+        guard let src = buffer.floatChannelData?[0] else { return nil }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return nil }
+
+        var data = Data(count: frames * 2)
+        data.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) in
+            let dst = rawPtr.bindMemory(to: Int16.self).baseAddress!
+            for i in 0..<frames {
+                let clamped = max(-1.0, min(1.0, src[i]))
+                dst[i] = Int16(clamped * Float(Int16.max))
+            }
+        }
+        return data
     }
 
     private static func convertToInt16(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

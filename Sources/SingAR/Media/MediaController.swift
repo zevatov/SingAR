@@ -1,12 +1,12 @@
 import Foundation
 import AppKit
 
-/// Pauses/ducks background media while dictating — a feature Apple dictation
-/// lacks. Uses the private `MediaRemote.framework`, accessed dynamically so the
-/// app still launches if symbols are unavailable.
+/// Pauses background media while dictating — a feature Apple dictation lacks.
+/// Uses the private `MediaRemote.framework`, accessed dynamically so the app
+/// still launches if symbols are unavailable.
 ///
-/// `pauseBackgroundMedia()` returns true only when it actually paused something,
-/// so `resumeBackgroundMedia()` is a no-op unless we caused the pause.
+/// Pause is best-effort. Resume is intentionally disabled: sending a generic
+/// Play command after dictation can launch Apple Music when no media was active.
 final class MediaController {
 
     private let handle: UnsafeMutableRawPointer?
@@ -26,22 +26,17 @@ final class MediaController {
         if let handle { dlclose(handle) }
     }
 
-    /// Pause whatever is playing. Returns true if it sent a pause command and
-    /// now-playing was actually playing (caller should call resume after).
+    /// Pause whatever is playing. Never report resumable state because this
+    /// private API does not synchronously prove that media was playing.
     func pauseBackgroundMedia() -> Bool {
         guard handle != nil else { return false }
-        // The now-playing getter uses an async completion handler; the robust
-        // approach is to send pause and let `resumeBackgroundMedia()` be
-        // guarded by the caller's didPauseMedia flag.
         sendCommand("kMRMediaRemoteCommandPause")
-        return true
+        return false
     }
 
-    /// Resume playback only if `pauseBackgroundMedia` paused it.
-    func resumeBackgroundMedia() {
-        guard handle != nil else { return }
-        sendCommand("kMRMediaRemoteCommandPlay")
-    }
+    /// Kept for caller compatibility. Generic Play is unsafe: when nothing was
+    /// paused it can start Apple Music after releasing Right Option.
+    func resumeBackgroundMedia() {}
 
     // MARK: Internals
 

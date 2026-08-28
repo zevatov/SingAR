@@ -1,41 +1,51 @@
 import AppKit
 
-/// Single-glyph status shown in the menu bar. Colour + symbol encode everything
-/// the user needs at a glance: idle / listening / recognizing / cloud / done.
-enum AppStatus {
+/// Single-glyph status shown in the menu bar and overlay capsule.
+enum AppStatus: Equatable {
     case idle
     case listening
     case recognizing
-    case cloud
-    case done
+    case inserting
+    case failed
 
     var symbol: String {
         switch self {
         case .idle:         return "mic.fill"
         case .listening:    return "mic.fill"
-        case .recognizing:  return "waveform"
-        case .cloud:        return "arrow.triangle.2.circlepath"
-        case .done:         return "checkmark.circle.fill"
+        case .recognizing:  return "sparkles"
+        case .inserting:    return "square.and.arrow.down.fill"
+        case .failed:       return "exclamationmark.triangle.fill"
         }
     }
 
     var color: NSColor {
         switch self {
-        case .idle:         return .secondaryLabelColor
-        case .listening:    return .systemRed
-        case .recognizing:  return .systemOrange
-        case .cloud:        return .systemBlue
-        case .done:         return .systemGreen
+        case .idle:         return .labelColor
+        case .listening:    return .systemCyan
+        case .recognizing:  return .systemPurple
+        case .inserting:    return .systemGreen
+        case .failed:       return .systemRed
         }
     }
 
     var tooltip: String {
         switch self {
         case .idle:         return "SingAR — готов"
-        case .listening:    return "SingAR — слушаю…"
-        case .recognizing:  return "SingAR — распознаю…"
-        case .cloud:        return "SingAR — облачный шаг…"
-        case .done:         return "SingAR — готово"
+        case .listening:    return "SingAR — запись…"
+        case .recognizing:  return "SingAR — обработка…"
+        case .inserting:    return "SingAR — вставка…"
+        case .failed:       return "SingAR — ошибка"
+        }
+    }
+
+    /// Short label shown as a status row in the dropdown menu.
+    var menuLabel: String {
+        switch self {
+        case .idle:         return "Готов к диктовке"
+        case .listening:    return "Запись…"
+        case .recognizing:  return "Обработка…"
+        case .inserting:    return "Вставка…"
+        case .failed:       return "Ошибка"
         }
     }
 }

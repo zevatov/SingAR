@@ -1,222 +1,216 @@
 import AppKit
+import SwiftUI
 
-/// Owns the menu bar item: a single coloured glyph that reflects dictation
-/// state, plus a dropdown menu exposing every feature as a toggle/radio backed
-/// by `AppSettings` (and therefore persisted in UserDefaults).
-final class StatusBarController: NSObject, NSMenuDelegate {
+/// Owns the menu bar status item with a combined Microphone glyph + live Status Dot (🟢/🟡/🔴),
+/// NSPopover with SwiftUI MenuBarView, and click handling.
+final class StatusBarController: NSObject {
 
     private let statusItem: NSStatusItem
+    private let popover: NSPopover
     private let settings = AppSettings.shared
     private var status: AppStatus = .idle
-    private var pulseTimer: Timer?
+    private var permCheckTimer: Timer?
 
     /// Wired by AppDelegate so menu actions can open UI.
     var onOpenSettings: (() -> Void)?
-    var onConfigureHotkey: (() -> Void)?
+    var onOpenHistory: (() -> Void)?
     var onOpenOnboarding: (() -> Void)?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        popover = NSPopover()
         super.init()
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
+
+        popover.contentSize = NSSize(width: 280, height: 380)
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: MenuBarView())
+
+        if let button = statusItem.button {
+            button.action = #selector(statusItemClicked(_:))
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+
         renderButton()
+
+        // Periodically refresh status dot in case permissions change in System Settings
+        permCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.renderButton()
+        }
+    }
+
+    deinit {
+        permCheckTimer?.invalidate()
+    }
+
+    // MARK: Click handling (Left: Popover, Right: Context Menu)
+
+    @objc private func statusItemClicked(_ sender: Any?) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp {
+            showRightClickMenu()
+        } else {
+            togglePopover()
+        }
+    }
+
+    func togglePopover() {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else if let button = statusItem.button {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+    }
+
+    private func showRightClickMenu() {
+        let menu = NSMenu()
+
+        let titleItem = NSMenuItem(title: "SingAR (Gemini 3.5)", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+        menu.addItem(.separator())
+
+        let enabledItem = NSMenuItem(
+            title: settings.enabled ? "Поставить на паузу" : "Возобновить работу",
+            action: #selector(toggleEnabled),
+            keyEquivalent: ""
+        )
+        enabledItem.target = self
+        menu.addItem(enabledItem)
+
+        let settingsItem = NSMenuItem(title: "Настройки...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let onboardingItem = NSMenuItem(title: "Разрешения...", action: #selector(openOnboarding), keyEquivalent: "")
+        onboardingItem.target = self
+        menu.addItem(onboardingItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Выход", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil // Reset so left-click continues opening popover
+    }
+
+    @objc private func toggleEnabled() {
+        settings.enabled.toggle()
+        renderButton()
+    }
+
+    @objc private func openSettings() {
+        DispatchQueue.main.async {
+            WindowManager.shared.showSettings()
+        }
+    }
+
+    @objc private func openOnboarding() {
+        DispatchQueue.main.async {
+            WindowManager.shared.showOnboarding()
+        }
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
     }
 
     // MARK: Public API
 
     func setStatus(_ status: AppStatus) {
         self.status = status
-        renderButton()
-        updatePulseAnimation()
+        renderButton(animated: true)
     }
 
-    /// Pulse the listening glyph so the user sees dictation is live.
-    private func updatePulseAnimation() {
-        pulseTimer?.invalidate()
-        pulseTimer = nil
-        guard status == .listening else { return }
-        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            self?.togglePulse()
+    func flashStatus() {
+        DispatchQueue.main.async { [weak self] in
+            guard let button = self?.statusItem.button else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.2
+                button.animator().contentTintColor = .systemRed
+            }, completionHandler: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    self?.renderButton(animated: true)
+                }
+            })
         }
     }
 
-    private var pulsed = false
-    private func togglePulse() {
-        pulsed.toggle()
-        guard let button = statusItem.button else { return }
-        // Flicker opacity for a subtle "listening" heartbeat.
-        button.contentTintColor = pulsed ? status.color.withAlphaComponent(0.4) : status.color
-    }
-
-    /// Screen-space frame of the status item button, for anchoring overlays.
     var statusItemButtonFrame: NSRect? {
-        statusItem.button?.window?.convertToScreen(
-            statusItem.button?.bounds ?? .zero
-        )
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        return window.convertToScreen(button.frame)
     }
 
-    // MARK: Button
+    // MARK: Combined Menu Bar Button Rendering (Microphone + Status Dot)
 
-    private func renderButton() {
-        guard let button = statusItem.button else { return }
-        let image = NSImage(systemSymbolName: status.symbol, accessibilityDescription: status.tooltip)
-        image?.isTemplate = false
-        button.image = image
-        button.contentTintColor = status.color
-        button.toolTip = status.tooltip
-    }
+    func renderButton(animated: Bool = false) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let button = self.statusItem.button else { return }
 
-    // MARK: Menu (rebuilt fresh on each open so state always matches settings)
+            let isEnabled = self.settings.enabled
+            let permissionsOk = PermissionChecker.shared.allGranted
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        rebuild(menu)
-    }
+            // 1. Determine Status Dot Color
+            let dotColor: NSColor
+            if !isEnabled {
+                dotColor = .systemRed       // 🔴 Paused
+            } else if !permissionsOk {
+                dotColor = .systemOrange    // 🟡 Missing permissions
+            } else {
+                dotColor = .systemGreen     // 🟢 Active & Ready
+            }
 
-    private func rebuild(_ menu: NSMenu) {
-        menu.removeAllItems()
+            // 2. Microphone Glyph
+            let symbolName = isEnabled ? self.status.symbol : "mic.slash"
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            guard let glyph = NSImage(systemSymbolName: symbolName, accessibilityDescription: self.status.tooltip)?
+                .withSymbolConfiguration(config) else { return }
 
-        // — Master switch —
-        menu.addItem(check("SingAR активен", on: settings.enabled, action: #selector(toggleEnabled)))
+            let totalWidth: CGFloat = 28
+            let totalHeight: CGFloat = 18
 
-        menu.addItem(.separator())
+            let combinedImage = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
+                // Draw Microphone icon on the left (white/template by default)
+                let glyphRect = NSRect(
+                    x: 0,
+                    y: (totalHeight - glyph.size.height) / 2,
+                    width: glyph.size.width,
+                    height: glyph.size.height
+                )
 
-        // — Режим активации —
-        menu.addItem(header("Режим:"))
-        radioGroup(DictationMode.allCases, current: settings.mode,
-                   indent: 1, action: #selector(selectMode(_:)), into: menu)
-        menu.addItem(header("Хоткей:", indent: 1))
-        radioGroup(HotkeyChoice.allCases, current: settings.hotkey,
-                   indent: 2, action: #selector(selectHotkey(_:)), into: menu)
+                if self.status != .idle && isEnabled {
+                    self.status.color.set()
+                    glyph.draw(in: glyphRect)
+                } else {
+                    let isDark = (UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark")
+                        || (button.window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+                        || (NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+                    let baseColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
+                    baseColor.set()
+                    glyph.draw(in: glyphRect)
+                }
 
-        menu.addItem(check("Авто-пунктуация", on: settings.autoPunctuation, action: #selector(toggleAutoPunctuation)))
-        menu.addItem(check("Голосовые команды", on: settings.voiceCommands, action: #selector(toggleVoiceCommands)))
-        menu.addItem(check("Live-частичные транскрипты", on: settings.livePartials, action: #selector(toggleLivePartials)))
+                // Draw Status Circle Dot on the right (🟢/🟡/🔴)
+                let dotSize: CGFloat = 6.0
+                let dotRect = NSRect(
+                    x: totalWidth - dotSize - 1,
+                    y: (totalHeight - dotSize) / 2,
+                    width: dotSize,
+                    height: dotSize
+                )
+                let path = NSBezierPath(ovalIn: dotRect)
+                dotColor.setFill()
+                path.fill()
 
-        menu.addItem(.separator())
+                return true
+            }
 
-        // — Фоновое медиа —
-        menu.addItem(check("Пауза фонового медиа при записи", on: settings.pauseMedia, action: #selector(togglePauseMedia)))
-        radioGroup(MediaPauseMode.allCases, current: settings.mediaMode,
-                   indent: 1, action: #selector(selectMediaMode(_:)), into: menu)
-
-        menu.addItem(.separator())
-
-        // — Облачный шаг —
-        menu.addItem(header("Облачный шаг:"))
-        radioGroup(CloudStep.allCases, current: settings.cloudStep,
-                   indent: 1, action: #selector(selectCloudStep(_:)), into: menu)
-        // Re-ASR model picker (only meaningful when re-ASR is selected).
-        if settings.cloudStep == .reASR {
-            menu.addItem(header("Модель re-ASR:", indent: 1))
-            radioGroup(ReASRModel.allCases, current: settings.reASRModel,
-                       indent: 2, action: #selector(selectReASRModel(_:)), into: menu)
-        }
-
-        menu.addItem(.separator())
-
-        // — Язык / модель —
-        menu.addItem(header("Язык:"))
-        radioGroup(ASRLanguage.allCases, current: settings.language,
-                   indent: 1, action: #selector(selectLanguage(_:)), into: menu)
-        menu.addItem(header("Локальная модель:"))
-        radioGroup(ASRModel.allCases, current: settings.model,
-                   indent: 1, action: #selector(selectModel(_:)), into: menu)
-
-        menu.addItem(.separator())
-
-        // — Прочее —
-        menu.addItem(check("Запускать при входе", on: settings.launchAtLogin, action: #selector(toggleLaunchAtLogin)))
-        menu.addItem(item("Хоткей…", action: #selector(configureHotkey)))
-        menu.addItem(item("Настройки…", action: #selector(openSettings)))
-        menu.addItem(item("Онбординг и разрешения…", action: #selector(openOnboarding)))
-        menu.addItem(.separator())
-        menu.addItem(item("Quit SingAR", action: #selector(terminate), key: "q"))
-    }
-
-    // MARK: Menu item helpers
-
-    private func check(_ title: String, on: Bool, action: Selector) -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        i.target = self
-        i.state = on ? .on : .off
-        return i
-    }
-
-    private func item(_ title: String, action: Selector, key: String = "") -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        i.target = self
-        return i
-    }
-
-    private func header(_ title: String, indent: Int = 0) -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        i.isEnabled = false
-        i.indentationLevel = indent
-        return i
-    }
-
-    private func radioGroup<T: RawRepresentable & CaseIterable & Equatable>(
-        _ cases: [T], current: T, indent: Int, action: Selector, into menu: NSMenu
-    ) where T.AllCases: RandomAccessCollection, T.RawValue == String {
-        for (index, value) in cases.enumerated() {
-            let title = (value as? MenuTitled)?.title ?? String(describing: value)
-            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            i.target = self
-            i.tag = index
-            i.state = (value == current) ? .on : .off
-            i.indentationLevel = indent
-            menu.addItem(i)
+            button.image = combinedImage
+            button.toolTip = isEnabled ? (permissionsOk ? self.status.tooltip : "Требуются разрешения") : "SingAR на паузе"
         }
     }
-
-    // MARK: Actions — bool toggles
-
-    @objc private func toggleEnabled()        { settings.enabled = !settings.enabled }
-    @objc private func toggleAutoPunctuation(){ settings.autoPunctuation = !settings.autoPunctuation }
-    @objc private func toggleVoiceCommands()  { settings.voiceCommands = !settings.voiceCommands }
-    @objc private func toggleLivePartials()   { settings.livePartials = !settings.livePartials }
-    @objc private func togglePauseMedia()     { settings.pauseMedia = !settings.pauseMedia }
-    @objc private func toggleLaunchAtLogin()  { settings.launchAtLogin = !settings.launchAtLogin }
-
-    // MARK: Actions — radio groups (index → enum case)
-
-    @objc private func selectMode(_ s: NSMenuItem)       { settings.mode = DictationMode.allCases[s.tag] }
-    @objc private func selectHotkey(_ s: NSMenuItem)     { settings.hotkey = HotkeyChoice.allCases[s.tag] }
-    @objc private func selectMediaMode(_ s: NSMenuItem)  { settings.mediaMode = MediaPauseMode.allCases[s.tag] }
-    @objc private func selectCloudStep(_ s: NSMenuItem)  { settings.cloudStep = CloudStep.allCases[s.tag] }
-    @objc private func selectReASRModel(_ s: NSMenuItem) { settings.reASRModel = ReASRModel.allCases[s.tag] }
-    @objc private func selectLanguage(_ s: NSMenuItem)   { settings.language = ASRLanguage.allCases[s.tag] }
-    @objc private func selectModel(_ s: NSMenuItem)      { settings.model = ASRModel.allCases[s.tag] }
-
-    // MARK: Actions — misc
-
-    @objc private func configureHotkey() {
-        onConfigureHotkey?()
-    }
-
-    @objc private func openSettings() {
-        onOpenSettings?()
-    }
-
-    @objc private func openOnboarding() {
-        onOpenOnboarding?()
-    }
-
-    @objc private func terminate() {
-        NSApp.terminate(nil)
-    }
 }
-
-/// Lets the generic radio-group helper reach a human title without forcing every
-/// enum to conform to a shared protocol publicly.
-private protocol MenuTitled {
-    var title: String { get }
-}
-extension DictationMode: MenuTitled {}
-extension HotkeyChoice: MenuTitled {}
-extension MediaPauseMode: MenuTitled {}
-extension CloudStep: MenuTitled {}
-extension ASRLanguage: MenuTitled {}
-extension ASRModel: MenuTitled {}

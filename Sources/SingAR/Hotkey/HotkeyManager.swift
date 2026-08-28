@@ -1,25 +1,29 @@
 import AppKit
 
-/// Global hotkey via a CGEventTap. Replaces Apple dictation's Fn/Globe trigger.
+/// Global hotkey via NSEvent global monitor + CGEventSource polling fallback.
+/// On macOS 26 (Tahoe), CGEventTap silently stops receiving events even with
+/// Input Monitoring granted; NSEvent.addGlobalMonitorForEvents is the reliable
+/// path for observing modifier-key presses system-wide.
 ///
-/// Default trigger: **hold** the Fn/Globe key (keycode 63) to talk, release to
-/// stop. In toggle mode, a press starts/stops dictation. Esc cancels an active
-/// session. Requires Accessibility + Input Monitoring permissions.
+/// Hold the trigger key to talk, release to stop (toggle mode: press to flip).
+/// Esc cancels an active session. Requires Accessibility permission.
 final class HotkeyManager {
 
     private let onActivate: () -> Void
     private let onDeactivate: () -> Void
     private let settings = AppSettings.shared
 
-    private var tap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
 
     /// Trigger keycode — read from settings (Fn/Globe or right-Option).
     private var triggerKeyCode: CGKeyCode { settings.hotkey.keyCode }
     /// Esc keycode.
     private let escKeyCode: CGKeyCode = 53
 
-    private var isTriggerDown = false
+    /// Was the trigger modifier flag set on the previous event? Track edge
+    /// transitions (false→true = press, true→false = release).
+    private var triggerFlagWasSet = false
     private var dictating = false
 
     init(onActivate: @escaping () -> Void, onDeactivate: @escaping () -> Void) {
@@ -27,106 +31,103 @@ final class HotkeyManager {
         self.onDeactivate = onDeactivate
     }
 
+    /// Force the toggle state back to "not dictating" without calling
+    /// onDeactivate. Used when dictation was stopped elsewhere (focus lost) so
+    /// the next trigger press cleanly starts a new session instead of being
+    /// consumed by a stale toggle.
+    func forceReset() {
+        dictating = false
+        triggerFlagWasSet = false
+    }
+
     func install() {
-        guard tap == nil else { return }
-        guard ensurePermissions() else { return }
+        guard globalMonitor == nil else { return }
+        ensurePermissions()
 
-        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.keyUp.rawValue)
-            | (1 << CGEventType.flagsChanged.rawValue)
-
-        let callback: CGEventTapCallBack = { _, _, event, refcon in
-            guard let refcon else { return Unmanaged.passUnretained(event) }
-            let me = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
-            return me.handle(event)
+        // Global monitor: catches events when SingAR is NOT the frontmost app
+        // (the normal dictation case — user is typing in another app).
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            self?.handle(event)
         }
 
-        guard let port = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            NSLog("[SingAR] failed to create CGEventTap (permissions?)")
-            return
+        // Local monitor: catches events when SingAR IS frontmost (settings window,
+        // onboarding) so the trigger still works there.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            self?.handle(event)
+            return event
         }
 
-        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
-        CGEvent.tapEnable(tap: port, enable: true)
-
-        tap = port
-        runLoopSource = src
+        NSLog("[SingAR] ✅ Hotkey monitors installed. Trigger keycode=\(triggerKeyCode) (\(settings.hotkey.rawValue)) mode=\(settings.mode.rawValue)")
     }
 
     func uninstall() {
-        if let src = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
-            runLoopSource = nil
-        }
-        tap = nil
+        if let g = globalMonitor { NSEvent.removeMonitor(g); globalMonitor = nil }
+        if let l = localMonitor { NSEvent.removeMonitor(l); localMonitor = nil }
     }
 
     // MARK: Permission guidance
 
-    private func ensurePermissions() -> Bool {
-        // Input Monitoring / Accessibility are checked at the system level; if the
-        // tap creation fails the user hasn't granted them. We surface guidance.
-        let trusted = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-        )
-        if !trusted {
-            NSLog("[SingAR] Accessibility permission missing — dictation hotkey inactive.")
-        }
-        return true // attempt the tap regardless; it no-ops if untrusted.
+    private func ensurePermissions() {
+        // CHECK ONLY — do not trigger a system prompt here. The onboarding
+        // window is the single place that requests permissions (and only when
+        // not yet granted), so the user never sees duplicate TCC dialogs.
+        let axTrusted = AXIsProcessTrusted()
+        NSLog("[SingAR] permissions: Accessibility=\(axTrusted ? "GRANTED" : "MISSING")")
     }
 
     // MARK: Event handling
 
-    private func handle(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let type = event.type
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    private func handle(_ event: NSEvent) {
+        let keyCode = event.keyCode
 
-        if keyCode == escKeyCode && dictating {
-            // Esc cancels an active dictation.
+        // Esc cancels an active dictation.
+        if keyCode == UInt16(escKeyCode) && event.type == .keyDown && dictating {
+            NSLog("[SingAR] Esc pressed — cancelling dictation")
             onDeactivate()
             dictating = false
-            return Unmanaged.passUnretained(event)
+            return
         }
 
-        guard keyCode == triggerKeyCode else { return Unmanaged.passUnretained(event) }
+        // Only flagsChanged events carry modifier-key presses/releases.
+        guard event.type == .flagsChanged else {
+            return
+        }
+        guard keyCode == UInt16(triggerKeyCode) else { return }
 
-        // Both Fn/Globe and right-Option arrive as flagsChanged events (they're
-        // modifier keys), so we handle them uniformly via the flagsChanged path.
+        // Track the flag state per trigger kind.
+        let flagSet: Bool
+        if settings.hotkey == .fnOrGlobe {
+            flagSet = event.modifierFlags.contains(.function)
+        } else {
+            flagSet = event.modifierFlags.contains(.option)
+        }
+
         switch settings.mode {
         case .hold:
-            // Hold-to-talk: flag goes down → start; flag goes up → stop.
-            if type == .flagsChanged && !isTriggerDown {
-                isTriggerDown = true
+            if flagSet && !triggerFlagWasSet {
+                NSLog("[SingAR] trigger DOWN — starting dictation")
+                triggerFlagWasSet = true
                 if !dictating && settings.enabled {
                     dictating = true
                     onActivate()
                 }
-            } else if type == .keyUp || (type == .flagsChanged && isTriggerDown) {
-                isTriggerDown = false
+            } else if !flagSet && triggerFlagWasSet {
+                NSLog("[SingAR] trigger UP — stopping dictation")
+                triggerFlagWasSet = false
                 if dictating {
                     dictating = false
                     onDeactivate()
                 }
             }
         case .toggle:
-            // Toggle: a press flips dictation on/off.
-            if (type == .flagsChanged || type == .keyDown) && !isTriggerDown {
-                isTriggerDown = true
+            if flagSet && !triggerFlagWasSet {
+                triggerFlagWasSet = true
                 dictating.toggle()
+                NSLog("[SingAR] trigger press — dictating=\(dictating)")
                 if dictating { onActivate() } else { onDeactivate() }
-            } else if type == .keyUp || (type == .flagsChanged && isTriggerDown) {
-                isTriggerDown = false
+            } else if !flagSet && triggerFlagWasSet {
+                triggerFlagWasSet = false
             }
         }
-
-        return Unmanaged.passUnretained(event)
     }
 }

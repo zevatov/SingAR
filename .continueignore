@@ -24,18 +24,11 @@ models/
 *.gguf
 *.onnx
 
-# User data / secrets / keys
-*.key
-*.pem
-*.env
-*.env.local
-
-# System & IDE
+# Git & System
+.git/
 .DS_Store
-.vscode/
-.idea/
 .Trash/
 
-# Scratch & temporary
+# Test & temporary scratch folders
 1/
 test/

@@ -3,7 +3,16 @@ import PackageDescription
 
 let package = Package(
     name: "SingAR",
-    platforms: [.macOS(.v14)],
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .executable(
+            name: "SingAR",
+            targets: ["SingAR"]
+        )
+    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "SingAR",
