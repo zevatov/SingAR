@@ -156,28 +156,31 @@ final class DictationController {
             var finalText = self.processed(transcript)
             NSLog("[SingAR] 📝 stopDictation: liveText=\"%@\" cloudCleanup=%d available=%d capturedBuffers=%d", String(finalText.prefix(60)), self.settings.cloudCleanup ? 1 : 0, self.cloud.available ? 1 : 0, captured.count)
 
-            // 2. High-precision ASR & Vibe-Coder Polish
-            if self.settings.cloudCleanup && self.cloud.available {
-                if let audioData = WAVWriter.wavData(from: captured) {
-                    NSLog("[SingAR] 🎧 stopDictation: WAV generated OK, size=%d bytes", audioData.count)
-                    if let transcribed = await self.cloud.cloudTranscribe(audio: audioData), !transcribed.isEmpty {
-                        NSLog("[SingAR] ✅ stopDictation: transcribed=\"%@\"", String(transcribed.prefix(80)))
+            // 2. High-precision Primary ASR pass (Local Whisper Turbo, Gemini 3.5, OpenRouter, Groq)
+            if self.cloud.available, let audioData = WAVWriter.wavData(from: captured) {
+                NSLog("[SingAR] 🎧 stopDictation: WAV generated OK, size=%d bytes, model=%@", audioData.count, self.settings.cloudModel.rawValue)
+                if let transcribed = await self.cloud.cloudTranscribe(audio: audioData), !transcribed.isEmpty {
+                    NSLog("[SingAR] ✅ stopDictation: transcribed=\"%@\"", String(transcribed.prefix(80)))
 
-                        // 3. Vibe-Coder formatting pass (flags, paths, camelCase, .env)
-                        if let polished = await self.cloud.polish(text: transcribed), !polished.isEmpty {
-                            finalText = self.processed(polished)
-                            provider = self.settings.cloudModel.rawValue + "+polish"
-                        } else {
-                            finalText = self.processed(transcribed)
-                            provider = self.settings.cloudModel.rawValue
-                        }
-                        model = self.settings.cloudModel.rawValue
-                    } else {
-                        NSLog("[SingAR] ⚠️ stopDictation: cloudTranscribe returned nil, keeping liveText")
+                    var polishedText: String?
+                    // 3. Optional Vibe-Coder polish pass
+                    if self.settings.cloudCleanup {
+                        polishedText = await self.cloud.polish(text: transcribed)
                     }
+
+                    if let polished = polishedText, !polished.isEmpty {
+                        finalText = self.processed(polished)
+                        provider = self.settings.cloudModel.rawValue + "+polish"
+                    } else {
+                        finalText = self.processed(transcribed)
+                        provider = self.settings.cloudModel.rawValue
+                    }
+                    model = self.settings.cloudModel.rawValue
                 } else {
-                    NSLog("[SingAR] ❌ stopDictation: WAVWriter.wavData returned nil from %d buffers", captured.count)
+                    NSLog("[SingAR] ⚠️ stopDictation: cloudTranscribe returned nil, using live/local text")
                 }
+            } else {
+                NSLog("[SingAR] ⚠️ stopDictation: cloud not available or WAV nil (available=%d, captured=%d)", self.cloud.available ? 1 : 0, captured.count)
             }
 
             let textToCommit = finalText

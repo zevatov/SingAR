@@ -207,11 +207,9 @@ final class CloudASR {
         }
     }
 
-    // MARK: Cloud transcription
+    // MARK: Primary Audio Transcription pass
 
     func cloudTranscribe(audio: Data) async -> String? {
-        guard settings.cloudCleanup else { return nil }
-
         switch settings.cloudModel {
         case .localWhisperTurbo:
             return await transcribeWithLocalWhisper(audio: audio)
@@ -229,7 +227,7 @@ final class CloudASR {
     // MARK: Ultra-fast Vibe-Coder Text Polish (~150-350ms)
 
     func polish(text: String) async -> String? {
-        guard settings.cloudCleanup, !text.isEmpty else { return nil }
+        guard !text.isEmpty else { return nil }
         guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else { return nil }
 
         let languageRule: String
@@ -248,9 +246,10 @@ final class CloudASR {
         1. Fix technical commands and CLI flags: preserve exact syntax, e.g. git status --short, npm run build, docker compose up -d, npx, cargo.
         2. Fix file paths and env files: e.g. src/components/Sidebar.tsx, .env, package.json, /usr/local/bin.
         3. Fix programming identifiers: camelCase (handleClick, getUser), UPPER_SNAKE_CASE (DATABASE_URL), PascalCase.
-        4. \(languageRule) Preserve developer anglicisms naturally (запушь в origin main, закоммить, задеплой, мердж реквест).
-        5. Remove vocal filler sounds (ээ, мм, ну).
-        6. Output ONLY the polished text. No explanations, no markdown fences, no quotes.
+        4. If technical terms or code were phonetically transcribed in Russian Cyrillic (e.g. 'нпм ран билд', 'гит статус шорт', 'хэндл клик', 'сайдбар'), CONVERT them to proper English code (e.g. 'npm run build', 'git status --short', 'handleClick', 'Sidebar').
+        5. \(languageRule) Preserve developer anglicisms naturally (запушь в origin main, закоммить, задеплой, мердж реквест).
+        6. Remove vocal filler sounds (ээ, мм, ну).
+        7. Output ONLY the polished text. No explanations, no markdown fences, no quotes.
 
         Text:
         \(text)
@@ -330,6 +329,7 @@ final class CloudASR {
         defer { try? FileManager.default.removeItem(at: tmpWav) }
 
         let lang = settings.language == .en ? "en" : "ru"
+        let codingPrompt = "npm run build, Sidebar.tsx, handleClick, git status --short, docker compose up -d, .env, origin main, cargo, npx, API, JSON, URL, camelCase, snake_case, TypeScript, React, Python, commit, deploy"
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: whisperBin)
@@ -337,7 +337,8 @@ final class CloudASR {
             "-m", modelPath,
             "-f", tmpWav.path,
             "-l", lang,
-            "-nt"
+            "-nt",
+            "--prompt", codingPrompt
         ]
 
         let pipe = Pipe()
@@ -363,10 +364,12 @@ final class CloudASR {
                     !line.hasPrefix("ggml_")
                 }
 
-            let result = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !result.isEmpty {
-                NSLog("[SingAR] ✅ localWhisper: SUCCESS text=\"%@\" (%dms)", String(result.prefix(80)), elapsed)
-                return result
+            let rawResult = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawResult.isEmpty {
+                // Apply local fast lexicon normalization for common tech terms
+                let normalized = CodeLexiconNormalizer.normalize(rawResult)
+                NSLog("[SingAR] ✅ localWhisper: SUCCESS text=\"%@\" (%dms)", String(normalized.prefix(80)), elapsed)
+                return normalized
             }
             return nil
         } catch {
