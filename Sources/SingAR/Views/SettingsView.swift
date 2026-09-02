@@ -309,7 +309,7 @@ struct SettingsView: View {
                         .font(.headline)
                         .foregroundColor(.primary)
 
-                    VStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Язык распознавания:")
                                 .font(.system(size: 12))
@@ -331,20 +331,9 @@ struct SettingsView: View {
 
                         Divider()
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Режим вставки текста:")
-                                .font(.system(size: 12, weight: .medium))
-                            Picker("", selection: $settings.livePartials) {
-                                Text("⚡️ Моментальная вставка (без стирания)").tag(false)
-                                Text("✍️ Live-печать во время речи").tag(true)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-
-                            Text(settings.livePartials ? "Слова печатаются прямо во время речи. При отпускании клавиши черновик заменяется на чистовик." : "Рекомендуемый режим: пока вы говорите, в документ ничего не сыпется. После отпускания клавиши готовый чистовик вставляется мгновенно.")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
+                        Toggle("Live-ввод: печатать текст прямо во время речи", isOn: $settings.livePartials)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
 
                         Divider()
 
@@ -352,7 +341,7 @@ struct SettingsView: View {
                             .toggleStyle(.checkbox)
                             .font(.system(size: 12))
                     }
-                    .padding(12)
+                    .padding(14)
                     .background(Color.brandCard)
                     .cornerRadius(10)
                     .overlay(
@@ -599,9 +588,10 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
         }
-        .frame(minWidth: 480, minHeight: 560)
+        .frame(minWidth: 520, minHeight: 620)
         .onAppear {
             googleApiKey = SecretStore.get(SecretStore.Account.googleApiKey) ?? ""
             openrouterKey = SecretStore.get(SecretStore.Account.openrouterKey) ?? ""

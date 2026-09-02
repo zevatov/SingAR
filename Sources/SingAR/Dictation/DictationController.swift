@@ -131,9 +131,11 @@ final class DictationController {
         logStage("transcribing", startedAt: transcribingStartedAt)
 
         SoundFeedback.stop()
-        indicator.hide()
-        statusBar.setStatus(.idle)
         resumeMediaIfNeeded()
+
+        // Transition to Processing state in both capsule indicator and status bar
+        statusBar.setStatus(.recognizing)
+        indicator.setStatus(.recognizing)
 
         // Give CoreAudio tap 120ms to flush remaining microphone frames
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12) { [weak self] in
@@ -206,13 +208,16 @@ final class DictationController {
                     let totalLatencyMs = Int(Date().timeIntervalSince(self.recordingStartedAt) * 1_000)
                     AppLogger.shared.log("⌨️ INJECTING FINAL TEXT: \"\(textToCommit)\" (provider: \(recordedProvider), model: \(recordedModel), totalLatency: \(totalLatencyMs)ms)")
 
-                    if self.hasLiveTyped && !self.lastLiveText.isEmpty {
-                        self.applyPolishedText(textToCommit)
-                    } else if !textToCommit.isEmpty {
-                        self.injector.insert(textToCommit)
-                    }
-
                     if !textToCommit.isEmpty {
+                        self.statusBar.setStatus(.inserting)
+                        self.indicator.setStatus(.inserting)
+
+                        if self.hasLiveTyped && !self.lastLiveText.isEmpty {
+                            self.applyPolishedText(textToCommit)
+                        } else {
+                            self.injector.insert(textToCommit)
+                        }
+
                         self.history.append(DictationHistoryEntry(
                             timestamp: Date(),
                             provider: recordedProvider,
@@ -220,6 +225,20 @@ final class DictationController {
                             latencyMs: totalLatencyMs,
                             text: textToCommit
                         ))
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                            guard let self, self.sessionGeneration == gen else { return }
+                            self.indicator.hide()
+                            self.statusBar.setStatus(.idle)
+                        }
+                    } else {
+                        self.statusBar.setStatus(.failed)
+                        self.indicator.setStatus(.failed)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                            guard let self, self.sessionGeneration == gen else { return }
+                            self.indicator.hide()
+                            self.statusBar.setStatus(.idle)
+                        }
                     }
                 }
             }
