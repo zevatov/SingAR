@@ -331,6 +331,17 @@ struct SettingsView: View {
 
                         Divider()
 
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Live-ввод: печатать текст прямо во время речи", isOn: $settings.livePartials)
+                                .toggleStyle(.checkbox)
+                                .font(.system(size: 12))
+                            Text("Рекомендуется держать выключенным: готовый отполированный текст вставляется целиком после завершения речи без мерцания и стираний.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+
+                        Divider()
+
                         Toggle("Приостанавливать музыку и видео во время речи", isOn: $settings.pauseMedia)
                             .toggleStyle(.checkbox)
                             .font(.system(size: 12))

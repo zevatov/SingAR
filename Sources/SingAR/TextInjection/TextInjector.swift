@@ -22,11 +22,13 @@ final class TextInjector {
             down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
             down?.post(tap: .cghidEventTap)
             up?.post(tap: .cghidEventTap)
+            usleep(2500) // 2.5ms delay ensures characters are ordered in target app
         }
     }
 
-    /// Press Backspace `count` times to erase previously-typed text.
+    /// Press Backspace `count` times to erase previously-typed text (paced to avoid dropped events).
     func backspace(count: Int) {
+        guard count > 0 else { return }
         let source = CGEventSource(stateID: .hidSystemState)
         // 0x33 = Delete/Backspace key code.
         for _ in 0..<count {
@@ -34,6 +36,7 @@ final class TextInjector {
             let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
             down?.post(tap: .cghidEventTap)
             up?.post(tap: .cghidEventTap)
+            usleep(4000) // 4ms delay ensures target editor actually deletes the character
         }
     }
 

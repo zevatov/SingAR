@@ -135,7 +135,7 @@ final class AppSettings: ObservableObject {
             Key.hotkey:          HotkeyChoice.rightOption.rawValue,
             Key.autoPunctuation: true,
             Key.voiceCommands:   true,
-            Key.livePartials:    true,
+            Key.livePartials:    false,
             Key.pauseMedia:      true,
             Key.cloudCleanup:    true,
             Key.cloudModel:      CloudModel.gemini35Transcribe.rawValue,

@@ -82,7 +82,7 @@ final class DictationController {
 
         // Initialize engines
         localAsr = SpeechEngine()
-        if cloud.available {
+        if settings.livePartials && settings.cloudModel == .gemini35Transcribe && cloud.available {
             geminiAsr = GeminiLiveEngine()
         } else {
             geminiAsr = nil
@@ -95,21 +95,23 @@ final class DictationController {
                 guard let self, self.isDictating else { return }
                 self.vad.feed(buffer)
 
-                // Feed real-time speech engine with live typing callback (mutually exclusive)
-                if let gemini = self.geminiAsr {
-                    gemini.feed(buffer) { [weak self] partial in
-                        guard let self, self.isDictating else { return }
-                        DispatchQueue.main.async {
-                            if !partial.isEmpty {
-                                self.handleLivePartial(partial)
+                // Feed real-time speech engine with live typing callback ONLY if livePartials is enabled
+                if self.settings.livePartials {
+                    if let gemini = self.geminiAsr {
+                        gemini.feed(buffer) { [weak self] partial in
+                            guard let self, self.isDictating else { return }
+                            DispatchQueue.main.async {
+                                if !partial.isEmpty {
+                                    self.handleLivePartial(partial)
+                                }
                             }
                         }
-                    }
-                } else {
-                    self.localAsr.feed(buffer) { [weak self] partial in
-                        guard let self, self.isDictating else { return }
-                        DispatchQueue.main.async {
-                            self.handleLivePartial(partial)
+                    } else {
+                        self.localAsr.feed(buffer) { [weak self] partial in
+                            guard let self, self.isDictating else { return }
+                            DispatchQueue.main.async {
+                                self.handleLivePartial(partial)
+                            }
                         }
                     }
                 }
@@ -233,7 +235,7 @@ final class DictationController {
     // MARK: Real-time Live Typing Engine
 
     private func handleLivePartial(_ newText: String) {
-        guard isDictating else { return }
+        guard isDictating, settings.livePartials else { return }
         let cleaned = processed(newText)
         guard !cleaned.isEmpty, cleaned != lastLiveText else { return }
 
@@ -255,6 +257,7 @@ final class DictationController {
 
         if backspacesNeeded > 0 {
             injector.backspace(count: backspacesNeeded)
+            usleep(10000) // 10ms pause between deletions and keystrokes
         }
         if !charsToType.isEmpty {
             injector.typeText(charsToType)
@@ -264,30 +267,19 @@ final class DictationController {
         hasLiveTyped = true
     }
 
-    /// Guaranteed application of polished text upon dictation finish
+    /// Guaranteed atomic application of polished text upon dictation finish
     private func applyPolishedText(_ polished: String) {
-        guard !polished.isEmpty, polished != lastLiveText else { return }
+        guard !polished.isEmpty else { return }
+        guard polished != lastLiveText else { return }
 
-        let oldChars = Array(lastLiveText)
-        let newChars = Array(polished)
-
-        var commonPrefixLength = 0
-        while commonPrefixLength < oldChars.count &&
-              commonPrefixLength < newChars.count &&
-              oldChars[commonPrefixLength] == newChars[commonPrefixLength] {
-            commonPrefixLength += 1
+        // Safely erase what was typed live during speech:
+        if !lastLiveText.isEmpty {
+            injector.backspace(count: lastLiveText.count)
+            usleep(25000) // 25ms pause for target editor to cleanly process deletions
         }
 
-        let backspacesNeeded = oldChars.count - commonPrefixLength
-        let charsToType = String(newChars[commonPrefixLength...])
-
-        if backspacesNeeded > 0 {
-            injector.backspace(count: backspacesNeeded)
-        }
-        if !charsToType.isEmpty {
-            injector.typeText(charsToType)
-        }
-
+        // Atomically paste the clean polished text (zero character drops, zero race conditions)
+        injector.insert(polished)
         lastLiveText = polished
     }
 
