@@ -186,6 +186,8 @@ final class DictationController {
                 guard self.sessionGeneration == gen else { return }
                 self.logStage("transcribing", startedAt: transcribingStartedAt, completed: true)
 
+                NSLog("[SingAR] ⌨️ INJECTING FINAL TEXT: \"%@\" (provider: %@, model: %@)", textToCommit, recordedProvider, recordedModel)
+
                 if self.hasLiveTyped {
                     // Smoothly apply the final polished audio text to the screen
                     self.applyPolishedText(textToCommit)
@@ -234,6 +236,8 @@ final class DictationController {
         guard isDictating else { return }
         let cleaned = processed(newText)
         guard !cleaned.isEmpty, cleaned != lastLiveText else { return }
+
+        NSLog("[SingAR] ⚡️ Live typing partial: \"%@\"", cleaned)
 
         // Compute common prefix to minimize backspaces
         let oldChars = Array(lastLiveText)
