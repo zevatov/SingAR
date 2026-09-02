@@ -191,13 +191,17 @@ final class CloudASR {
 
     // MARK: Availability
 
-    /// Cloud cleanup is available when a key is configured for the selected model.
+    /// Cloud cleanup / ASR is available when configured for the selected model.
     var available: Bool {
         switch settings.cloudModel {
+        case .localWhisperTurbo:
+            return ModelDownloadManager.shared.isModelInstalled
         case .gemini35Transcribe:
             return SecretStore.get(SecretStore.Account.googleApiKey) != nil
         case .gpt4oTranscribe:
             return SecretStore.get(SecretStore.Account.openrouterKey) != nil
+        case .groqWhisper:
+            return SecretStore.get(SecretStore.Account.groqApiKey) != nil
         case .localOnly:
             return false
         }
@@ -209,16 +213,20 @@ final class CloudASR {
         guard settings.cloudCleanup else { return nil }
 
         switch settings.cloudModel {
+        case .localWhisperTurbo:
+            return await transcribeWithLocalWhisper(audio: audio)
         case .gemini35Transcribe:
             return await transcribeWithGoogleGemini(audio: audio)
         case .gpt4oTranscribe:
             return await transcribeWithOpenRouter(audio: audio)
+        case .groqWhisper:
+            return await transcribeWithGroq(audio: audio)
         case .localOnly:
             return nil
         }
     }
 
-    // MARK: Ultra-fast Text Polish via Gemini (~150-250ms)
+    // MARK: Ultra-fast Vibe-Coder Text Polish (~150-350ms)
 
     func polish(text: String) async -> String? {
         guard settings.cloudCleanup, !text.isEmpty else { return nil }
@@ -227,21 +235,22 @@ final class CloudASR {
         let languageRule: String
         switch settings.language {
         case .auto:
-            languageRule = "Format Russian in Cyrillic and English in Latin for tech words. Do NOT translate."
+            languageRule = "Format Russian in Cyrillic and English in Latin for tech words and code. Do NOT translate Russian sentences to English."
         case .ru:
-            languageRule = "Format primarily in Russian Cyrillic, keeping code/tech terms in English. Do NOT translate to English."
+            languageRule = "Format primarily in Russian Cyrillic, keeping code/tech terms and commands in English. Do NOT translate Russian to English."
         case .en:
             languageRule = "Format in English."
         }
 
         let promptText = """
-        You are a fast speech text polisher for a developer.
+        You are an elite code and terminal text formatter for a developer (vibe coder).
         Format and punctuate this dictated text:
-        1. Fix punctuation, capitalization, and grammatical structure naturally.
-        2. Preserve programming variable names (camelCase, snake_case), file paths (e.g. /usr/bin), and technical commands.
-        3. Remove spoken filler sounds (ээ, мм, ну).
-        4. \(languageRule)
-        5. Output ONLY the polished text. No explanations, no markdown fences, no quotes.
+        1. Fix technical commands and CLI flags: preserve exact syntax, e.g. git status --short, npm run build, docker compose up -d, npx, cargo.
+        2. Fix file paths and env files: e.g. src/components/Sidebar.tsx, .env, package.json, /usr/local/bin.
+        3. Fix programming identifiers: camelCase (handleClick, getUser), UPPER_SNAKE_CASE (DATABASE_URL), PascalCase.
+        4. \(languageRule) Preserve developer anglicisms naturally (запушь в origin main, закоммить, задеплой, мердж реквест).
+        5. Remove vocal filler sounds (ээ, мм, ну).
+        6. Output ONLY the polished text. No explanations, no markdown fences, no quotes.
 
         Text:
         \(text)
@@ -262,13 +271,13 @@ final class CloudASR {
         ]
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
-        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=\(apiKey)"
+        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\(apiKey)"
         guard let url = URL(string: urlString) else { return nil }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.httpBody = body
-        req.timeoutInterval = 8
+        req.timeoutInterval = 6
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         do {
@@ -291,13 +300,90 @@ final class CloudASR {
         }
     }
 
+    // MARK: Local Whisper (Metal on Apple Silicon)
+
+    private func transcribeWithLocalWhisper(audio: Data) async -> String? {
+        guard let modelPath = ModelDownloadManager.shared.activeModelPath else {
+            NSLog("[SingAR] ❌ localWhisper: model not found")
+            return nil
+        }
+
+        // Find whisper-cli executable
+        let possibleBins = [
+            Bundle.main.resourceURL?.appendingPathComponent("whisper-cli").path,
+            "/opt/homebrew/bin/whisper-cli",
+            "/usr/local/bin/whisper-cli"
+        ].compactMap { $0 }
+
+        guard let whisperBin = possibleBins.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            NSLog("[SingAR] ❌ localWhisper: whisper-cli binary not found in standard paths")
+            return nil
+        }
+
+        let tmpWav = FileManager.default.temporaryDirectory.appendingPathComponent("singar-whisper-\(UUID().uuidString).wav")
+        do {
+            try audio.write(to: tmpWav)
+        } catch {
+            NSLog("[SingAR] ❌ localWhisper: failed to write tmp WAV: \(error)")
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: tmpWav) }
+
+        let lang = settings.language == .en ? "en" : "ru"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: whisperBin)
+        process.arguments = [
+            "-m", modelPath,
+            "-f", tmpWav.path,
+            "-l", lang,
+            "-nt"
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe() // suppress stderr logs
+
+        let t0 = Date()
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+            let outData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let rawOutput = String(data: outData, encoding: .utf8) ?? ""
+
+            let lines = rawOutput.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { line in
+                    !line.isEmpty &&
+                    !line.hasPrefix("whisper_") &&
+                    !line.hasPrefix("main:") &&
+                    !line.hasPrefix("system_info") &&
+                    !line.hasPrefix("ggml_")
+                }
+
+            let result = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !result.isEmpty {
+                NSLog("[SingAR] ✅ localWhisper: SUCCESS text=\"%@\" (%dms)", String(result.prefix(80)), elapsed)
+                return result
+            }
+            return nil
+        } catch {
+            NSLog("[SingAR] ❌ localWhisper process error: \(error)")
+            return nil
+        }
+    }
+
     // MARK: Google Gemini 3.5 Transcribe API
 
     private func transcribeWithGoogleGemini(audio: Data) async -> String? {
         guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
-            NSLog("[SingAR] Google API Key is missing")
+            NSLog("[SingAR] ❌ cloudTranscribe: Google API Key is MISSING")
             return nil
         }
+
+        NSLog("[SingAR] 🎤 cloudTranscribe: audio size = %d bytes (%.1f KB base64)", audio.count, Double(audio.count) * 4.0 / 3.0 / 1024.0)
 
         let languageRule: String
         switch settings.language {
@@ -319,6 +405,8 @@ final class CloudASR {
         3. \(languageRule)
         """
 
+        let audioBase64 = audio.base64EncodedString()
+
         let payload: [String: Any] = [
             "contents": [
                 [
@@ -327,7 +415,7 @@ final class CloudASR {
                         [
                             "inline_data": [
                                 "mime_type": "audio/wav",
-                                "data": audio.base64EncodedString()
+                                "data": audioBase64
                             ]
                         ]
                     ]
@@ -338,12 +426,14 @@ final class CloudASR {
             ]
         ]
 
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            NSLog("[SingAR] ❌ cloudTranscribe: JSON serialization failed")
+            return nil
+        }
 
         // Primary Google Gemini 3.5 Transcribe model
         let modelsToTry = [
-            "gemini-3.5-transcribe",
-            "gemini-3.6-flash"
+            "gemini-3.5-transcribe"
         ]
 
         for modelName in modelsToTry {
@@ -353,12 +443,21 @@ final class CloudASR {
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.httpBody = body
-            req.timeoutInterval = 30
+            req.timeoutInterval = 12
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let t0 = Date()
+            NSLog("[SingAR] 🚀 cloudTranscribe: calling model=%@ ...", modelName)
 
             do {
                 let (data, response) = try await URLSession.shared.data(for: req)
-                guard let http = response as? HTTPURLResponse else { continue }
+                let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+                guard let http = response as? HTTPURLResponse else {
+                    NSLog("[SingAR] ❌ cloudTranscribe: no HTTP response from %@ (%dms)", modelName, elapsed)
+                    continue
+                }
+
+                NSLog("[SingAR] 📡 cloudTranscribe: model=%@ status=%d elapsed=%dms responseSize=%d", modelName, http.statusCode, elapsed, data.count)
 
                 if http.statusCode == 200 {
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -366,27 +465,48 @@ final class CloudASR {
                        let firstCandidate = candidates.first,
                        let content = firstCandidate["content"] as? [String: Any],
                        let parts = content["parts"] as? [[String: Any]],
-                       let firstPart = parts.first,
-                       let text = firstPart["text"] as? String {
-                        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !cleaned.isEmpty {
-                            return cleaned
+                       let firstPart = parts.first {
+
+                        // Google Gemini 3.5 Transcribe returns { "audioTranscription": { "text": "..." } }
+                        var extractedText: String?
+                        if let audioTranscription = firstPart["audioTranscription"] as? [String: Any],
+                           let t = audioTranscription["text"] as? String {
+                            extractedText = t
+                        } else if let t = firstPart["text"] as? String {
+                            extractedText = t
                         }
+
+                        if let cleaned = extractedText?.trimmingCharacters(in: .whitespacesAndNewlines), !cleaned.isEmpty {
+                            NSLog("[SingAR] ✅ cloudTranscribe: SUCCESS model=%@ text=\"%@\" (%dms)", modelName, String(cleaned.prefix(80)), elapsed)
+                            return cleaned
+                        } else {
+                            NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ returned empty text", modelName)
+                            continue
+                        }
+                    } else {
+                        let rawStr = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                        NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ 200 but parse failed. Raw: %@", modelName, String(rawStr.prefix(300)))
+                        continue
                     }
                 } else if http.statusCode == 404 {
-                    // Try next model fallback
-                    NSLog("[SingAR] Google model \(modelName) returned 404, falling back...")
+                    NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ returned 404", modelName)
+                    continue
+                } else if http.statusCode == 429 {
+                    NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ rate limited (429)", modelName)
                     continue
                 } else {
-                    NSLog("[SingAR] Google Gemini HTTP error: \(http.statusCode)")
-                    return nil
+                    let rawStr = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                    NSLog("[SingAR] ❌ cloudTranscribe: model=%@ HTTP %d: %@", modelName, http.statusCode, String(rawStr.prefix(200)))
+                    continue
                 }
             } catch {
-                NSLog("[SingAR] Google Gemini request error: \(error)")
-                return nil
+                let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+                NSLog("[SingAR] ❌ cloudTranscribe: model=%@ error after %dms: %@", modelName, elapsed, error.localizedDescription)
+                continue
             }
         }
 
+        NSLog("[SingAR] ❌ cloudTranscribe: all models exhausted, returning nil")
         return nil
     }
 
@@ -405,7 +525,7 @@ final class CloudASR {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.httpBody = body
-        req.timeoutInterval = 45
+        req.timeoutInterval = 25
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
@@ -415,6 +535,56 @@ final class CloudASR {
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let text = json["text"] as? String {
                 return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: Groq Whisper API
+
+    private func transcribeWithGroq(audio: Data) async -> String? {
+        guard let key = SecretStore.get(SecretStore.Account.groqApiKey), !key.isEmpty else { return nil }
+
+        guard let url = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 10
+
+        let boundary = "----SingARGroq\(UUID().uuidString)"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-large-v3\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(audio)
+        body.append("\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\njson\r\n".data(using: .utf8)!)
+
+        let lang = settings.language == .en ? "en" : "ru"
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n\(lang)\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        req.httpBody = body
+
+        let t0 = Date()
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let text = json["text"] as? String {
+                let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                NSLog("[SingAR] ✅ groqWhisper: SUCCESS text=\"%@\" (%dms)", String(cleaned.prefix(80)), elapsed)
+                return cleaned
             }
             return nil
         } catch {

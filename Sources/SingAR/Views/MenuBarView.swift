@@ -144,6 +144,30 @@ struct MenuBarView: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                 }
+
+                Divider()
+
+                // Engine Switcher
+                HStack {
+                    Label("Движок", systemImage: "cpu")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Menu {
+                        ForEach(CloudModel.allCases, id: \.self) { m in
+                            Button(m.title) { settings.cloudModel = m }
+                        }
+                    } label: {
+                        Text(shortEngineTitle(settings.cloudModel))
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(5)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
             }
             .padding(10)
             .background(Color.brandCard)
@@ -277,5 +301,15 @@ struct MenuBarView: View {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private func shortEngineTitle(_ model: CloudModel) -> String {
+        switch model {
+        case .localWhisperTurbo:  return "Whisper Turbo"
+        case .gemini35Transcribe: return "Gemini 3.5"
+        case .gpt4oTranscribe:    return "GPT-4o"
+        case .groqWhisper:        return "Groq Whisper"
+        case .localOnly:          return "Apple Speech"
+        }
     }
 }

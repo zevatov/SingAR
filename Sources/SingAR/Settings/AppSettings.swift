@@ -36,15 +36,19 @@ enum HotkeyChoice: String, CaseIterable, MenuTitled {
 /// Cloud speech recognition backend.
 /// Google Gemini 3.5 Transcribe is the flagship model with 2.6% WER and native code/punctuation awareness.
 enum CloudModel: String, CaseIterable, MenuTitled {
-    case gemini35Transcribe = "google/gemini-3.5-transcribe"      // Flagship, 2.6% WER, code aware
-    case gpt4oTranscribe    = "openai/gpt-4o-transcribe"         // Legacy fallback
-    case localOnly          = "local/apple-speech"               // Offline on-device only
+    case localWhisperTurbo  = "local/whisper-turbo"              // Offline, 0 keys, Metal GPU
+    case gemini35Transcribe = "google/gemini-3.5-transcribe"      // Google Free Tier, 2.6% WER
+    case gpt4oTranscribe    = "openai/gpt-4o-transcribe"         // OpenRouter / OpenAI
+    case groqWhisper        = "groq/whisper-large-v3"            // Ultra-speed ~300ms
+    case localOnly          = "local/apple-speech"               // Offline on-device Apple Speech
 
     var title: String {
         switch self {
+        case .localWhisperTurbo:  return "Локальный Whisper Turbo (Metal, 0 ключей, офлайн)"
         case .gemini35Transcribe: return "Google Gemini 3.5 Transcribe (Бесплатно / Быстро)"
         case .gpt4oTranscribe:    return "GPT-4o Transcribe (OpenRouter)"
-        case .localOnly:          return "Только локально (Apple Speech, без сети)"
+        case .groqWhisper:        return "Groq Whisper Large v3 (Ультра-скорость ~300мс)"
+        case .localOnly:          return "Только Apple Speech (без сети)"
         }
     }
 }

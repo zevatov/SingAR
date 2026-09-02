@@ -95,18 +95,20 @@ final class DictationController {
                 guard let self, self.isDictating else { return }
                 self.vad.feed(buffer)
 
-                // Feed real-time speech engine with live typing callback
-                self.localAsr.feed(buffer) { [weak self] partial in
-                    guard let self, self.isDictating else { return }
-                    DispatchQueue.main.async {
-                        self.handleLivePartial(partial)
+                // Feed real-time speech engine with live typing callback (mutually exclusive)
+                if let gemini = self.geminiAsr {
+                    gemini.feed(buffer) { [weak self] partial in
+                        guard let self, self.isDictating else { return }
+                        DispatchQueue.main.async {
+                            if !partial.isEmpty {
+                                self.handleLivePartial(partial)
+                            }
+                        }
                     }
-                }
-
-                self.geminiAsr?.feed(buffer) { [weak self] partial in
-                    guard let self, self.isDictating else { return }
-                    DispatchQueue.main.async {
-                        if !partial.isEmpty {
+                } else {
+                    self.localAsr.feed(buffer) { [weak self] partial in
+                        guard let self, self.isDictating else { return }
+                        DispatchQueue.main.async {
                             self.handleLivePartial(partial)
                         }
                     }
@@ -134,8 +136,8 @@ final class DictationController {
 
         Task { [weak self] in
             guard let self else { return }
-            var provider = "gemini-live"
-            var model = "gemini-3.5-transcribe-live"
+            var provider = "live"
+            var model = self.settings.cloudModel.rawValue
 
             // 1. Gather live text from engines
             async let localFinal = self.localAsr.finalize()
@@ -150,14 +152,29 @@ final class DictationController {
             }
 
             var finalText = self.processed(transcript)
+            NSLog("[SingAR] 📝 stopDictation: liveText=\"%@\" cloudCleanup=%d available=%d capturedBuffers=%d", String(finalText.prefix(60)), self.settings.cloudCleanup ? 1 : 0, self.cloud.available ? 1 : 0, captured.count)
 
-            // 2. High-precision Gemini 3.5 Audio Transcription Polish
-            if self.settings.cloudCleanup && self.cloud.available,
-               let audioData = WAVWriter.wavData(from: captured) {
-                if let polished = await self.cloud.cloudTranscribe(audio: audioData), !polished.isEmpty {
-                    finalText = self.processed(polished)
-                    provider = "gemini-live+polish"
-                    model = "gemini-3.5-transcribe"
+            // 2. High-precision ASR & Vibe-Coder Polish
+            if self.settings.cloudCleanup && self.cloud.available {
+                if let audioData = WAVWriter.wavData(from: captured) {
+                    NSLog("[SingAR] 🎧 stopDictation: WAV generated OK, size=%d bytes", audioData.count)
+                    if let transcribed = await self.cloud.cloudTranscribe(audio: audioData), !transcribed.isEmpty {
+                        NSLog("[SingAR] ✅ stopDictation: transcribed=\"%@\"", String(transcribed.prefix(80)))
+
+                        // 3. Vibe-Coder formatting pass (flags, paths, camelCase, .env)
+                        if let polished = await self.cloud.polish(text: transcribed), !polished.isEmpty {
+                            finalText = self.processed(polished)
+                            provider = self.settings.cloudModel.rawValue + "+polish"
+                        } else {
+                            finalText = self.processed(transcribed)
+                            provider = self.settings.cloudModel.rawValue
+                        }
+                        model = self.settings.cloudModel.rawValue
+                    } else {
+                        NSLog("[SingAR] ⚠️ stopDictation: cloudTranscribe returned nil, keeping liveText")
+                    }
+                } else {
+                    NSLog("[SingAR] ❌ stopDictation: WAVWriter.wavData returned nil from %d buffers", captured.count)
                 }
             }
 

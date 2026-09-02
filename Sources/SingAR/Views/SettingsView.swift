@@ -4,8 +4,11 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var history = DictationHistory.shared
+    @ObservedObject private var modelManager = ModelDownloadManager.shared
 
     @State private var googleApiKey = ""
+    @State private var openrouterKey = ""
+    @State private var groqApiKey = ""
     @State private var isVerifyingKey = false
     @State private var keyStatus: KeyValidationStatus = .untested
 
@@ -61,75 +64,179 @@ struct SettingsView: View {
 
                 Divider()
 
-                // Section 1: Google Gemini 3.5 Transcribe (BYOK Free Tier)
+                // Section 1: Speech-to-Text Engine & API Keys
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Image(systemName: "sparkles")
-                            .foregroundColor(Color.brandViolet)
-                        Text("Google Gemini 3.5 Transcribe")
+                        Image(systemName: "cpu")
+                            .foregroundColor(Color.brandAccent)
+                        Text("Движок распознавания речи")
                             .font(.headline)
                             .foregroundColor(.primary)
                         Spacer()
-                        Text("Бесплатный тариф")
-                            .font(.system(size: 10, weight: .semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.brandGreen.opacity(0.15))
-                            .foregroundColor(Color.brandGreen)
-                            .cornerRadius(4)
                     }
 
                     VStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text("Google AI Studio API Key:")
-                                    .font(.system(size: 12, weight: .medium))
-                                Spacer()
-                                Link("Получить ключ бесплатно ↗", destination: URL(string: "https://aistudio.google.com/app/apikey")!)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(Color.brandAccent)
+                        // Engine Picker
+                        HStack {
+                            Text("Провайдер:")
+                                .font(.system(size: 12, weight: .medium))
+                            Spacer()
+                            Picker("", selection: $settings.cloudModel) {
+                                ForEach(CloudModel.allCases, id: \.self) { m in
+                                    Text(m.title).tag(m)
+                                }
                             }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
 
-                            HStack {
-                                SecureField("Вставьте AI Studio API Key (AIzaSy...)", text: $googleApiKey)
-                                    .textFieldStyle(.roundedBorder)
-                                    .onChange(of: googleApiKey) { _, newValue in
-                                        SecretStore.set(newValue, for: SecretStore.Account.googleApiKey)
-                                        keyStatus = .untested
+                        Divider()
+
+                        // Contextual settings per model
+                        switch settings.cloudModel {
+                        case .localWhisperTurbo:
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Модель Whisper Large v3 Turbo")
+                                            .font(.system(size: 12, weight: .semibold))
+                                        Text("100% автономно на Metal GPU Apple Silicon, 0 ключей.")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
                                     }
+                                    Spacer()
 
-                                Button(action: verifyGoogleKey) {
-                                    if isVerifyingKey {
-                                        ProgressView()
+                                    if modelManager.isModelInstalled {
+                                        HStack(spacing: 6) {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundColor(Color.brandGreen)
+                                                Text("Установлена")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundColor(Color.brandGreen)
+                                            }
+
+                                            Button("Удалить") {
+                                                modelManager.deleteModel()
+                                            }
                                             .controlSize(.small)
+                                        }
+                                    } else if case .downloading = modelManager.status {
+                                        Button("Отмена") {
+                                            modelManager.cancelDownload()
+                                        }
+                                        .controlSize(.small)
                                     } else {
-                                        Text("Проверить")
+                                        Button("Скачать (~1.5 ГБ)") {
+                                            modelManager.startDownload()
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(Color.brandAccent)
+                                        .controlSize(.small)
                                     }
                                 }
-                                .disabled(googleApiKey.isEmpty || isVerifyingKey)
+
+                                if case .downloading(let progress) = modelManager.status {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        ProgressView(value: progress)
+                                        Text("Загрузка: \(Int(progress * 100))%")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
                             }
 
-                            // Key Status Feedback
-                            switch keyStatus {
-                            case .untested:
-                                EmptyView()
-                            case .valid:
-                                HStack(spacing: 4) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(Color.brandGreen)
-                                    Text("Ключ активен и проверен!")
-                                        .font(.caption)
-                                        .foregroundColor(Color.brandGreen)
+                        case .gemini35Transcribe:
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("Google AI Studio API Key:")
+                                        .font(.system(size: 12, weight: .medium))
+                                    Spacer()
+                                    Link("Получить бесплатно ↗", destination: URL(string: "https://aistudio.google.com/app/apikey")!)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color.brandAccent)
                                 }
-                            case .invalid(let err):
-                                HStack(spacing: 4) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundColor(.red)
-                                    Text("Ошибка: \(err)")
-                                        .font(.caption)
-                                        .foregroundColor(.red)
+
+                                HStack {
+                                    SecureField("Вставьте Google API Key", text: $googleApiKey)
+                                        .textFieldStyle(.roundedBorder)
+                                        .onChange(of: googleApiKey) { _, newValue in
+                                            SecretStore.set(newValue, for: SecretStore.Account.googleApiKey)
+                                            keyStatus = .untested
+                                        }
+
+                                    Button(action: verifyGoogleKey) {
+                                        if isVerifyingKey {
+                                            ProgressView().controlSize(.small)
+                                        } else {
+                                            Text("Проверить")
+                                        }
+                                    }
+                                    .disabled(googleApiKey.isEmpty || isVerifyingKey)
+                                }
+
+                                switch keyStatus {
+                                case .untested:
+                                    EmptyView()
+                                case .valid:
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(Color.brandGreen)
+                                        Text("Ключ активен!")
+                                            .font(.caption)
+                                            .foregroundColor(Color.brandGreen)
+                                    }
+                                case .invalid(let err):
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundColor(.red)
+                                        Text("Ошибка: \(err)")
+                                            .font(.caption)
+                                            .foregroundColor(.red)
+                                    }
                                 }
                             }
+
+                        case .gpt4oTranscribe:
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("OpenRouter API Key:")
+                                        .font(.system(size: 12, weight: .medium))
+                                    Spacer()
+                                    Link("openrouter.ai/keys ↗", destination: URL(string: "https://openrouter.ai/keys")!)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color.brandAccent)
+                                }
+
+                                SecureField("Вставьте OpenRouter API Key (sk-or-...)", text: $openrouterKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: openrouterKey) { _, newValue in
+                                        SecretStore.set(newValue, for: SecretStore.Account.openrouterKey)
+                                    }
+                            }
+
+                        case .groqWhisper:
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("Groq API Key:")
+                                        .font(.system(size: 12, weight: .medium))
+                                    Spacer()
+                                    Link("console.groq.com/keys ↗", destination: URL(string: "https://console.groq.com/keys")!)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color.brandAccent)
+                                }
+
+                                SecureField("Вставьте Groq API Key (gsk_...)", text: $groqApiKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: groqApiKey) { _, newValue in
+                                        SecretStore.set(newValue, for: SecretStore.Account.groqApiKey)
+                                    }
+                            }
+
+                        case .localOnly:
+                            Text("Используется встроенный системный распознаватель Apple Speech. Качество для кода ограничено.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
                         }
                     }
                     .padding(12)
@@ -450,6 +557,9 @@ struct SettingsView: View {
         .frame(minWidth: 480, minHeight: 560)
         .onAppear {
             googleApiKey = SecretStore.get(SecretStore.Account.googleApiKey) ?? ""
+            openrouterKey = SecretStore.get(SecretStore.Account.openrouterKey) ?? ""
+            groqApiKey = SecretStore.get(SecretStore.Account.groqApiKey) ?? ""
+            modelManager.refreshStatus()
             history.reload()
             checkPermissions()
             if !googleApiKey.isEmpty {

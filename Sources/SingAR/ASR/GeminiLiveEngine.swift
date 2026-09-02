@@ -206,8 +206,27 @@ final class GeminiLiveEngine: ASREngine {
 
         // Check for streamed text from Gemini Live
         if let serverContent = json["serverContent"] as? [String: Any] {
-            if let modelTurn = serverContent["modelTurn"] as? [String: Any],
-               let parts = modelTurn["parts"] as? [[String: Any]] {
+            // 1. Google Gemini Live Transcription uses interimInputTranscription or inputTranscription
+            if let interim = serverContent["interimInputTranscription"] as? [String: Any],
+               let text = interim["text"] as? String, !text.isEmpty {
+                let (current, cb) = withLock {
+                    self.accumulatedText = text
+                    return (self.accumulatedText, self.onPartial)
+                }
+                DispatchQueue.main.async {
+                    cb?(current)
+                }
+            } else if let inputTrans = serverContent["inputTranscription"] as? [String: Any],
+                      let text = inputTrans["text"] as? String, !text.isEmpty {
+                let (current, cb) = withLock {
+                    self.accumulatedText = text
+                    return (self.accumulatedText, self.onPartial)
+                }
+                DispatchQueue.main.async {
+                    cb?(current)
+                }
+            } else if let modelTurn = serverContent["modelTurn"] as? [String: Any],
+                      let parts = modelTurn["parts"] as? [[String: Any]] {
                 for part in parts {
                     if let text = part["text"] as? String, !text.isEmpty {
                         let (current, cb) = withLock {
@@ -234,13 +253,18 @@ final class GeminiLiveEngine: ASREngine {
     }
 
     func finalize() async -> String {
-        withLock { isAlive = false }
-
         // Send turnComplete to Google to finalize recognition
         sendTurnComplete()
 
-        // Wait up to 500ms for final server response
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        // Graceful audio drain: wait up to 850ms for in-flight audio frames and trailing words
+        let deadline = Date().addingTimeInterval(0.85)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let hasCont = withLock { self.completionContinuation == nil }
+            if !hasCont { break }
+        }
+
+        withLock { isAlive = false }
 
         let text = withLock {
             let result = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)

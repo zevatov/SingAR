@@ -1,10 +1,21 @@
 import SwiftUI
 import AppKit
 
+enum OnboardingMode: String {
+    case cloud
+    case local
+}
+
 struct OnboardingView: View {
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var modelManager = ModelDownloadManager.shared
+
     @State private var isAccessibilityGranted = PermissionChecker.shared.status(of: .accessibility) == .granted
     @State private var isMicGranted = PermissionChecker.shared.status(of: .microphone) == .granted
     @State private var isSpeechGranted = PermissionChecker.shared.status(of: .speechRecognition) == .granted
+
+    @State private var selectedMode: OnboardingMode = .cloud
+    @State private var cloudApiKey: String = SecretStore.get(SecretStore.Account.googleApiKey) ?? ""
 
     var allGranted: Bool {
         isAccessibilityGranted && isMicGranted && isSpeechGranted
@@ -86,8 +97,103 @@ struct OnboardingView: View {
                     .stroke(Color.brandBorder, lineWidth: 1)
             )
 
+            // Section 2: Engine Mode Selection
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Движок распознавания речи")
+                    .font(.system(size: 13, weight: .bold))
+
+                Picker("", selection: $selectedMode) {
+                    Text("☁️ Легкое облако (0 МБ)").tag(OnboardingMode.cloud)
+                    Text("🚀 Локально Metal (~1.5 ГБ)").tag(OnboardingMode.local)
+                }
+                .pickerStyle(.segmented)
+
+                if selectedMode == .cloud {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Google AI Studio API Key:")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            Link("Получить бесплатно ↗", destination: URL(string: "https://aistudio.google.com/app/apikey")!)
+                                .font(.system(size: 10))
+                                .foregroundColor(Color.brandAccent)
+                        }
+
+                        SecureField("Вставьте API Key (бесплатно, без карты)", text: $cloudApiKey)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .onChange(of: cloudApiKey) { _, newVal in
+                                SecretStore.set(newVal, for: SecretStore.Account.googleApiKey)
+                            }
+
+                        Text("⚡️ 0 МБ на диске. Gemini 3.5 Transcribe + вайб-кодерская постобработка.")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 2)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Whisper Large v3 Turbo")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("100% офлайн, ускорение Metal на Apple Silicon, 0 ключей.")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+
+                            if modelManager.isModelInstalled {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(Color.brandGreen)
+                                    Text("Готово")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(Color.brandGreen)
+                                }
+                            } else if case .downloading = modelManager.status {
+                                Button("Отмена") {
+                                    modelManager.cancelDownload()
+                                }
+                                .controlSize(.small)
+                            } else {
+                                Button("Скачать (~1.5 ГБ)") {
+                                    modelManager.startDownload()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Color.brandAccent)
+                                .controlSize(.small)
+                            }
+                        }
+
+                        if case .downloading(let progress) = modelManager.status {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ProgressView(value: progress)
+                                Text("Скачивание модели: \(Int(progress * 100))%")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+            .padding(14)
+            .background(Color.brandCard)
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.brandBorder, lineWidth: 1)
+            )
+
             // Done Button
             Button(action: {
+                if selectedMode == .local && modelManager.isModelInstalled {
+                    settings.cloudModel = .localWhisperTurbo
+                } else {
+                    settings.cloudModel = .gemini35Transcribe
+                }
                 WindowManager.shared.closeOnboarding()
             }) {
                 Text(allGranted ? "Начать использование" : "Закрыть")

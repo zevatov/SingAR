@@ -29,6 +29,8 @@ enum SecretStore {
         static let googleApiKey = "google_api_key"
         /// Optional OpenRouter key fallback.
         static let openrouterKey = "openrouter_key"
+        /// Optional Groq key for ultra-fast Whisper (~300ms).
+        static let groqApiKey = "groq_api_key"
     }
 }
 

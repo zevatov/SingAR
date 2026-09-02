@@ -24,7 +24,7 @@ final class AudioRecorder {
         // Cleared here, NOT in stop — the cloud pass reads capturedBuffers
         // after stop; only a fresh start can safely drop them (by then the
         // previous cloud pass already holds its own immutable Data copy).
-        capturedBuffers.removeAll()
+        clearCapturedBuffers()
         self.onBuffer = onBuffer
 
         let inputNode = engine.inputNode
@@ -54,8 +54,21 @@ final class AudioRecorder {
         onBuffer = nil
     }
 
-    /// All captured PCM since start, for the final ASR pass.
-    private(set) var capturedBuffers: [AVAudioPCMBuffer] = []
+    /// All captured PCM since start, for the final ASR pass (thread-safe).
+    private var _capturedBuffers: [AVAudioPCMBuffer] = []
+    private let bufferLock = NSLock()
+
+    var capturedBuffers: [AVAudioPCMBuffer] {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return _capturedBuffers
+    }
+
+    func clearCapturedBuffers() {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        _capturedBuffers.removeAll()
+    }
 
     private func resample(_ input: AVAudioPCMBuffer) {
         guard let converter else { return }
@@ -82,7 +95,11 @@ final class AudioRecorder {
             NSLog("[SingAR] audio convert error: \(error?.localizedDescription ?? "unknown")")
             return
         }
-        capturedBuffers.append(out)
+
+        bufferLock.lock()
+        _capturedBuffers.append(out)
+        bufferLock.unlock()
+
         onBuffer?(out)
     }
 }
