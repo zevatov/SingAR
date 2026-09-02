@@ -31,9 +31,9 @@ enum AppStatus: Equatable {
     var tooltip: String {
         switch self {
         case .idle:         return "SingAR — готов"
-        case .listening:    return "SingAR — запись…"
-        case .recognizing:  return "SingAR — обработка…"
-        case .inserting:    return "SingAR — вставка…"
+        case .listening:    return "SingAR — запись"
+        case .recognizing:  return "SingAR — обработка"
+        case .inserting:    return "SingAR — вставка"
         case .failed:       return "SingAR — ошибка"
         }
     }
@@ -42,9 +42,9 @@ enum AppStatus: Equatable {
     var menuLabel: String {
         switch self {
         case .idle:         return "Готов к диктовке"
-        case .listening:    return "Запись…"
-        case .recognizing:  return "Обработка…"
-        case .inserting:    return "Вставка…"
+        case .listening:    return "Запись"
+        case .recognizing:  return "Обработка"
+        case .inserting:    return "Вставка"
         case .failed:       return "Ошибка"
         }
     }

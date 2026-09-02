@@ -241,7 +241,7 @@ struct MenuBarView: View {
                         .frame(minHeight: 90, maxHeight: 170)
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(.opacity)
             }
 
             Divider()
@@ -249,8 +249,7 @@ struct MenuBarView: View {
             // Footer action buttons (2 buttons 50/50 width)
             HStack(spacing: 8) {
                 Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        history.reload()
+                    withAnimation(.easeInOut(duration: 0.22)) {
                         isHistoryExpanded.toggle()
                     }
                 } label: {

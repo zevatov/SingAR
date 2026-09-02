@@ -10,7 +10,9 @@ final class DictationIndicator {
 
     private let panel: NSPanel
     private let blur: NSVisualEffectView
+    private let contentStack: NSStackView
     private let iconView: NSImageView
+    private let spinner: NSProgressIndicator
     private let statusLabel: NSTextField
     private let waveformContainer: NSView
     private let bars: [CALayer]
@@ -20,7 +22,7 @@ final class DictationIndicator {
     private var smoothedLevel: CGFloat = 0
 
     init() {
-        let width: CGFloat = 176
+        let width: CGFloat = 180
         let height: CGFloat = 40
 
         panel = NSPanel(
@@ -34,39 +36,57 @@ final class DictationIndicator {
         panel.level = .statusBar
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.appearance = NSAppearance(named: .darkAqua)
 
         blur = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        blur.material = .popover
+        blur.material = .hudWindow
         blur.blendingMode = .behindWindow
         blur.state = .active
         blur.wantsLayer = true
         blur.layer?.cornerRadius = 20
         blur.layer?.cornerCurve = .continuous
         blur.layer?.masksToBounds = true
+        blur.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = blur
+
+        contentStack = NSStackView()
+        contentStack.orientation = .horizontal
+        contentStack.alignment = .centerY
+        contentStack.spacing = 8
+        contentStack.distribution = .fill
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(contentStack)
 
         iconView = NSImageView()
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
-        blur.addSubview(iconView)
+        contentStack.addArrangedSubview(iconView)
+
+        spinner = NSProgressIndicator()
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = true
+        contentStack.addArrangedSubview(spinner)
 
         statusLabel = NSTextField(labelWithString: "")
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        statusLabel.textColor = .labelColor
-        blur.addSubview(statusLabel)
+        statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        statusLabel.textColor = .white
+        contentStack.addArrangedSubview(statusLabel)
 
         waveformContainer = NSView()
         waveformContainer.translatesAutoresizingMaskIntoConstraints = false
         waveformContainer.wantsLayer = true
-        blur.addSubview(waveformContainer)
+        contentStack.addArrangedSubview(waveformContainer)
 
         var createdBars: [CALayer] = []
         let barW: CGFloat = 2.5
         let barGap: CGFloat = 2.5
         for i in 0..<barCount {
             let bar = CALayer()
-            bar.backgroundColor = NSColor.systemRed.cgColor
+            bar.backgroundColor = NSColor.systemCyan.cgColor
             bar.cornerRadius = 1.25
             let x = CGFloat(i) * (barW + barGap)
             bar.frame = CGRect(x: x, y: 11, width: barW, height: 4)
@@ -76,16 +96,15 @@ final class DictationIndicator {
         bars = createdBars
 
         NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 14),
-            iconView.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
+            contentStack.centerXAnchor.constraint(equalTo: blur.centerXAnchor),
+            contentStack.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
+
             iconView.widthAnchor.constraint(equalToConstant: 16),
             iconView.heightAnchor.constraint(equalToConstant: 16),
 
-            statusLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            statusLabel.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
+            spinner.widthAnchor.constraint(equalToConstant: 16),
+            spinner.heightAnchor.constraint(equalToConstant: 16),
 
-            waveformContainer.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -14),
-            waveformContainer.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
             waveformContainer.widthAnchor.constraint(equalToConstant: CGFloat(barCount) * barW + CGFloat(barCount - 1) * barGap),
             waveformContainer.heightAnchor.constraint(equalToConstant: 26)
         ])
@@ -95,7 +114,7 @@ final class DictationIndicator {
 
     // MARK: Public API
 
-    /// Update status capsule state (icon, label, waveform visibility).
+    /// Update status capsule state (icon, label, spinner, waveform visibility).
     func setStatus(_ status: AppStatus) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -106,9 +125,7 @@ final class DictationIndicator {
             if let img = NSImage(systemSymbolName: status.symbol, accessibilityDescription: status.menuLabel)?
                 .withSymbolConfiguration(config) {
                 let tinted = NSImage(size: img.size, flipped: false) { rect in
-                    let isDark = (self.panel.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
-                    let baseColor = (status == .idle) ? (isDark ? NSColor.white : NSColor.black) : status.color
-                    baseColor.set()
+                    NSColor.white.set()
                     img.draw(in: rect)
                     return true
                 }
@@ -116,9 +133,23 @@ final class DictationIndicator {
             }
 
             let isListening = (status == .listening)
+            let isRecognizing = (status == .recognizing)
+
+            // Waveform only while speaking
             self.waveformContainer.isHidden = !isListening
             if !isListening {
                 self.resetWaveform()
+            }
+
+            // Spinner during recognition ("Обработка")
+            if isRecognizing {
+                self.iconView.isHidden = true
+                self.spinner.isHidden = false
+                self.spinner.startAnimation(nil)
+            } else {
+                self.spinner.stopAnimation(nil)
+                self.spinner.isHidden = true
+                self.iconView.isHidden = false
             }
 
             self.updateAccessibility(status: status)
