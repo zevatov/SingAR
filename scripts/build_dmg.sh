@@ -6,36 +6,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_NAME="SingAR"
+BIN_NAME="SingAR"
 VERSION=$(grep 'static let current' "$ROOT/Sources/SingAR/Config/AppVersion.swift" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$VERSION" ]; then
-    VERSION="2.1.10"
+    VERSION="2.1.11"
 fi
+APP_BUNDLE_NAME="SingAR $VERSION.app"
 DMG_TITLE="SingAR $VERSION"
 DMG_PATH="$ROOT/SingAR $VERSION.dmg"
 BUILD_DIR="$ROOT/build"
-APP_PATH="$BUILD_DIR/$APP_NAME.app"
+APP_PATH="$BUILD_DIR/$APP_BUNDLE_NAME"
 TEMP_STAGING=$(mktemp -d /tmp/singar-dmg-staging.XXXXXX)
 
 echo "==> Building Release configuration via Swift PM (v$VERSION)..."
 swift build -c release
 
-RELEASE_BIN=$(swift build -c release --show-bin-path)/$APP_NAME
+RELEASE_BIN=$(swift build -c release --show-bin-path)/$BIN_NAME
 
 if [ ! -f "$RELEASE_BIN" ]; then
     echo "ERROR: Release binary $RELEASE_BIN not found" >&2
     exit 1
 fi
 
-echo "==> Assembling $APP_NAME.app bundle (v$VERSION)..."
+echo "==> Assembling $APP_BUNDLE_NAME bundle (v$VERSION)..."
 rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 
-cp "$RELEASE_BIN" "$APP_PATH/Contents/MacOS/$APP_NAME"
-chmod +x "$APP_PATH/Contents/MacOS/$APP_NAME"
+cp "$RELEASE_BIN" "$APP_PATH/Contents/MacOS/$BIN_NAME"
+chmod +x "$APP_PATH/Contents/MacOS/$BIN_NAME"
 
-# Create Info.plist with interpolated version
+# Create Info.plist with interpolated version and app bundle name
 cat << EOF > "$APP_PATH/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,15 +45,15 @@ cat << EOF > "$APP_PATH/Contents/Info.plist"
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>SingAR</string>
+    <string>$BIN_NAME</string>
     <key>CFBundleIdentifier</key>
     <string>com.singar.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>SingAR</string>
+    <string>SingAR $VERSION</string>
     <key>CFBundleDisplayName</key>
-    <string>SingAR</string>
+    <string>SingAR $VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
