@@ -40,7 +40,7 @@ struct SettingsView: View {
                         Text("Настройки SingAR")
                             .font(.title2)
                             .fontWeight(.bold)
-                        Text("Версия 2.1 beta")
+                        Text("Версия \(AppVersion.current)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -331,11 +331,17 @@ struct SettingsView: View {
 
                         Divider()
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Toggle("Live-ввод: печатать текст прямо во время речи", isOn: $settings.livePartials)
-                                .toggleStyle(.checkbox)
-                                .font(.system(size: 12))
-                            Text("Рекомендуется держать выключенным: готовый отполированный текст вставляется целиком после завершения речи без мерцания и стираний.")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Режим вставки текста:")
+                                .font(.system(size: 12, weight: .medium))
+                            Picker("", selection: $settings.livePartials) {
+                                Text("⚡️ Моментальная вставка (без стирания)").tag(false)
+                                Text("✍️ Live-печать во время речи").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+
+                            Text(settings.livePartials ? "Слова печатаются прямо во время речи. При отпускании клавиши черновик заменяется на чистовик." : "Рекомендуемый режим: пока вы говорите, в документ ничего не сыпется. После отпускания клавиши готовый чистовик вставляется мгновенно.")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
@@ -494,6 +500,36 @@ struct SettingsView: View {
                                 }
                                 .frame(maxHeight: 220)
                             }
+
+                            Divider()
+
+                            HStack {
+                                Button(action: {
+                                    NSWorkspace.shared.open(AppLogger.logFileURL)
+                                }) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "doc.text.magnifyingglass")
+                                        Text("Открыть лог (singar.log)")
+                                    }
+                                    .font(.system(size: 11))
+                                }
+                                .buttonStyle(.bordered)
+
+                                Spacer()
+
+                                Button(action: {
+                                    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                                    let dir = appSupport.appendingPathComponent("SingAR")
+                                    NSWorkspace.shared.open(dir)
+                                }) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "folder")
+                                        Text("Папка данных")
+                                    }
+                                    .font(.system(size: 11))
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
                     }
                     .padding(12)
@@ -577,7 +613,7 @@ struct SettingsView: View {
                 verifyGoogleKey()
             }
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(Timer.publish(every: 2.5, on: .main, in: .common).autoconnect()) { _ in
             checkPermissions()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

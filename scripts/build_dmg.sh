@@ -7,14 +7,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 APP_NAME="SingAR"
-VERSION="2.1-beta"
-DMG_TITLE="SingAR 2.1 beta"
-DMG_PATH="$ROOT/SingAR 2.1 beta.dmg"
+VERSION=$(grep 'static let current' "$ROOT/Sources/SingAR/Config/AppVersion.swift" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$VERSION" ]; then
+    VERSION="2.1.10"
+fi
+DMG_TITLE="SingAR $VERSION"
+DMG_PATH="$ROOT/SingAR $VERSION.dmg"
 BUILD_DIR="$ROOT/build"
 APP_PATH="$BUILD_DIR/$APP_NAME.app"
 TEMP_STAGING=$(mktemp -d /tmp/singar-dmg-staging.XXXXXX)
 
-echo "==> Building Release configuration via Swift PM..."
+echo "==> Building Release configuration via Swift PM (v$VERSION)..."
 swift build -c release
 
 RELEASE_BIN=$(swift build -c release --show-bin-path)/$APP_NAME
@@ -24,7 +27,7 @@ if [ ! -f "$RELEASE_BIN" ]; then
     exit 1
 fi
 
-echo "==> Assembling $APP_NAME.app bundle..."
+echo "==> Assembling $APP_NAME.app bundle (v$VERSION)..."
 rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
@@ -32,8 +35,8 @@ mkdir -p "$APP_PATH/Contents/Resources"
 cp "$RELEASE_BIN" "$APP_PATH/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_PATH/Contents/MacOS/$APP_NAME"
 
-# Create Info.plist
-cat << 'EOF' > "$APP_PATH/Contents/Info.plist"
+# Create Info.plist with interpolated version
+cat << EOF > "$APP_PATH/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -53,9 +56,9 @@ cat << 'EOF' > "$APP_PATH/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.1-beta</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
-    <string>2.1-beta</string>
+    <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

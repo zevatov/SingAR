@@ -338,6 +338,9 @@ final class CloudASR {
             "-f", tmpWav.path,
             "-l", lang,
             "-nt",
+            "--no-fallback",
+            "--suppress-nst",
+            "-nth", "0.65",
             "--prompt", codingPrompt
         ]
 
@@ -366,14 +369,15 @@ final class CloudASR {
 
             let rawResult = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if !rawResult.isEmpty {
-                // Apply local fast lexicon normalization for common tech terms
+                // Apply local fast lexicon normalization and remove any YouTube hallucinations
                 let normalized = CodeLexiconNormalizer.normalize(rawResult)
-                NSLog("[SingAR] ✅ localWhisper: SUCCESS text=\"%@\" (%dms)", String(normalized.prefix(80)), elapsed)
-                return normalized
+                AppLogger.shared.log("✅ localWhisper: raw=\"\(rawResult)\" -> normalized=\"\(normalized)\" (\(elapsed)ms)")
+                return normalized.isEmpty ? nil : normalized
             }
+            AppLogger.shared.log("⚠️ localWhisper: empty output (\(elapsed)ms)")
             return nil
         } catch {
-            NSLog("[SingAR] ❌ localWhisper process error: \(error)")
+            AppLogger.shared.log("❌ localWhisper process error: \(error)")
             return nil
         }
     }

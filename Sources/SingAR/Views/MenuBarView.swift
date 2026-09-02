@@ -56,8 +56,13 @@ struct MenuBarView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("SingAR")
-                        .font(.system(size: 14, weight: .bold))
+                    HStack(spacing: 4) {
+                        Text("SingAR")
+                            .font(.system(size: 14, weight: .bold))
+                        Text("v\(AppVersion.current)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                     Text(statusSubtitle)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)

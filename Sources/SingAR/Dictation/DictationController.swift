@@ -126,89 +126,101 @@ final class DictationController {
 
         let gen = sessionGeneration
         let transcribingStartedAt = Date()
+        let recordingDurationMs = Int(Date().timeIntervalSince(recordingStartedAt) * 1000)
         logStage("recording", startedAt: recordingStartedAt, completed: true)
         logStage("transcribing", startedAt: transcribingStartedAt)
 
-        let captured = audio.capturedBuffers
-        audio.stop()
         SoundFeedback.stop()
         indicator.hide()
         statusBar.setStatus(.idle)
         resumeMediaIfNeeded()
 
-        Task { [weak self] in
+        // Give CoreAudio tap 120ms to flush remaining microphone frames
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self else { return }
-            var provider = "live"
-            var model = self.settings.cloudModel.rawValue
+            let captured = self.audio.capturedBuffers
+            self.audio.stop()
 
-            // 1. Gather live text from engines
-            async let localFinal = self.localAsr.finalize()
-            async let geminiFinal = self.geminiAsr?.finalize() ?? ""
+            Task { [weak self] in
+                guard let self else { return }
+                var provider = "live"
+                var model = self.settings.cloudModel.rawValue
 
-            let l = await localFinal
-            let g = await geminiFinal
+                // 1. Gather live text from engines
+                async let localFinal = self.localAsr.finalize()
+                async let geminiFinal = self.geminiAsr?.finalize() ?? ""
 
-            var transcript = !g.isEmpty ? g : l
-            if transcript.isEmpty {
-                transcript = self.lastLiveText
-            }
+                let l = await localFinal
+                let g = await geminiFinal
 
-            var finalText = self.processed(transcript)
-            NSLog("[SingAR] 📝 stopDictation: liveText=\"%@\" cloudCleanup=%d available=%d capturedBuffers=%d", String(finalText.prefix(60)), self.settings.cloudCleanup ? 1 : 0, self.cloud.available ? 1 : 0, captured.count)
+                var transcript = !g.isEmpty ? g : l
+                if transcript.isEmpty {
+                    transcript = self.lastLiveText
+                }
 
-            // 2. High-precision Primary ASR pass (Local Whisper Turbo, Gemini 3.5, OpenRouter, Groq)
-            if self.cloud.available, let audioData = WAVWriter.wavData(from: captured) {
-                NSLog("[SingAR] 🎧 stopDictation: WAV generated OK, size=%d bytes, model=%@", audioData.count, self.settings.cloudModel.rawValue)
-                if let transcribed = await self.cloud.cloudTranscribe(audio: audioData), !transcribed.isEmpty {
-                    NSLog("[SingAR] ✅ stopDictation: transcribed=\"%@\"", String(transcribed.prefix(80)))
+                var finalText = self.processed(transcript)
+                AppLogger.shared.log("📝 stopDictation: audioRecorded=\(recordingDurationMs)ms, buffers=\(captured.count), liveText=\"\(finalText)\", cloudModel=\(self.settings.cloudModel.rawValue), cloudCleanup=\(self.settings.cloudCleanup)")
 
-                    var polishedText: String?
-                    // 3. Optional Vibe-Coder polish pass
-                    if self.settings.cloudCleanup {
-                        polishedText = await self.cloud.polish(text: transcribed)
-                    }
+                // 2. High-precision Primary ASR pass (Local Whisper Turbo, Gemini 3.5, OpenRouter, Groq)
+                if self.cloud.available, let audioData = WAVWriter.wavData(from: captured) {
+                    AppLogger.shared.log("🎧 stopDictation: WAV generated OK, size=\(audioData.count) bytes, running \(self.settings.cloudModel.rawValue)...")
+                    let asrStart = Date()
+                    if let transcribed = await self.cloud.cloudTranscribe(audio: audioData), !transcribed.isEmpty {
+                        let asrElapsed = Int(Date().timeIntervalSince(asrStart) * 1000)
+                        AppLogger.shared.log("✅ stopDictation: ASR finished in \(asrElapsed)ms: transcribed=\"\(transcribed)\"")
 
-                    if let polished = polishedText, !polished.isEmpty {
-                        finalText = self.processed(polished)
-                        provider = self.settings.cloudModel.rawValue + "+polish"
+                        var polishedText: String?
+                        // 3. Optional Vibe-Coder polish pass
+                        if self.settings.cloudCleanup {
+                            let polishStart = Date()
+                            polishedText = await self.cloud.polish(text: transcribed)
+                            let polishElapsed = Int(Date().timeIntervalSince(polishStart) * 1000)
+                            if let p = polishedText, !p.isEmpty {
+                                AppLogger.shared.log("✨ stopDictation: Polish finished in \(polishElapsed)ms: \"\(p)\"")
+                            }
+                        }
+
+                        if let polished = polishedText, !polished.isEmpty {
+                            finalText = self.processed(polished)
+                            provider = self.settings.cloudModel.rawValue + "+polish"
+                        } else {
+                            finalText = self.processed(transcribed)
+                            provider = self.settings.cloudModel.rawValue
+                        }
+                        model = self.settings.cloudModel.rawValue
                     } else {
-                        finalText = self.processed(transcribed)
-                        provider = self.settings.cloudModel.rawValue
+                        AppLogger.shared.log("⚠️ stopDictation: cloudTranscribe returned nil, using live/local text")
                     }
-                    model = self.settings.cloudModel.rawValue
                 } else {
-                    NSLog("[SingAR] ⚠️ stopDictation: cloudTranscribe returned nil, using live/local text")
-                }
-            } else {
-                NSLog("[SingAR] ⚠️ stopDictation: cloud not available or WAV nil (available=%d, captured=%d)", self.cloud.available ? 1 : 0, captured.count)
-            }
-
-            let textToCommit = finalText
-            let recordedProvider = provider
-            let recordedModel = model
-
-            await MainActor.run {
-                guard self.sessionGeneration == gen else { return }
-                self.logStage("transcribing", startedAt: transcribingStartedAt, completed: true)
-
-                NSLog("[SingAR] ⌨️ INJECTING FINAL TEXT: \"%@\" (provider: %@, model: %@)", textToCommit, recordedProvider, recordedModel)
-
-                if self.hasLiveTyped {
-                    // Smoothly apply the final polished audio text to the screen
-                    self.applyPolishedText(textToCommit)
-                } else if !textToCommit.isEmpty {
-                    self.injector.insert(textToCommit)
+                    AppLogger.shared.log("⚠️ stopDictation: cloud not available or WAV nil (available=\(self.cloud.available), captured=\(captured.count))")
                 }
 
-                if !textToCommit.isEmpty {
-                    let latencyMs = Int(Date().timeIntervalSince(self.recordingStartedAt) * 1_000)
-                    self.history.append(DictationHistoryEntry(
-                        timestamp: Date(),
-                        provider: recordedProvider,
-                        model: recordedModel,
-                        latencyMs: latencyMs,
-                        text: textToCommit
-                    ))
+                let textToCommit = finalText
+                let recordedProvider = provider
+                let recordedModel = model
+
+                await MainActor.run {
+                    guard self.sessionGeneration == gen else { return }
+                    self.logStage("transcribing", startedAt: transcribingStartedAt, completed: true)
+
+                    let totalLatencyMs = Int(Date().timeIntervalSince(self.recordingStartedAt) * 1_000)
+                    AppLogger.shared.log("⌨️ INJECTING FINAL TEXT: \"\(textToCommit)\" (provider: \(recordedProvider), model: \(recordedModel), totalLatency: \(totalLatencyMs)ms)")
+
+                    if self.hasLiveTyped && !self.lastLiveText.isEmpty {
+                        self.applyPolishedText(textToCommit)
+                    } else if !textToCommit.isEmpty {
+                        self.injector.insert(textToCommit)
+                    }
+
+                    if !textToCommit.isEmpty {
+                        self.history.append(DictationHistoryEntry(
+                            timestamp: Date(),
+                            provider: recordedProvider,
+                            model: recordedModel,
+                            latencyMs: totalLatencyMs,
+                            text: textToCommit
+                        ))
+                    }
                 }
             }
         }
