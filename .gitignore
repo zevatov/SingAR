@@ -42,3 +42,7 @@ test/
 .build-gate01-verify/
 архив версий/
 
+# Local handbooks and private backlogs
+*handbook*
+docs/local-*
+
