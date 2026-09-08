@@ -39,3 +39,6 @@ models/
 # Scratch & temporary
 1/
 test/
+.build-gate01-verify/
+архив версий/
+

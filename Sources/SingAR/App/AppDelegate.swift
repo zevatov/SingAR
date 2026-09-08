@@ -24,8 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onDeactivate: { [weak self] in
                 self?.dictation.stopDictation()
+            },
+            onCancel: { [weak self] in
+                self?.dictation.cancelDictation()
             }
         )
+        hotkey.canCancel = { [weak self] in self?.dictation.canCancel ?? false }
 
         // Reset hotkey state if text focus is lost
         dictation.onFocusLost = { [weak self] in

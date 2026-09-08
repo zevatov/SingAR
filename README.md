@@ -5,9 +5,9 @@
 **Высокопроизводительный нативный голосовой ввод и vibe-кодинг для macOS**
 
 [![macOS](https://img.shields.io/badge/macOS-14.0%2B-black?style=flat&logo=apple)](https://apple.com)
-[![Swift](https://img.shields.io/badge/Swift-6.3-F05138?style=flat&logo=swift)](https://swift.org)
+[![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138?style=flat&logo=swift)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-0078D7?style=flat)](https://developer.apple.com/metal/)
-[![Version](https://img.shields.io/badge/version-2.1.13-brightgreen.svg)](https://github.com/zevatov/SingAR)
+[![Version](https://img.shields.io/badge/version-2.2.0-brightgreen.svg)](https://github.com/zevatov/SingAR)
 
 </div>
 
@@ -54,6 +54,13 @@
 ### 6. Защита от обрезки речи (120ms CoreAudio Drain)
 Встроенный буфер задержки предотвращает проглатывание последних слогов при быстром отпускании клавиши.
 
+### 7. Полная отмена по Esc
+Нажатие `Esc` во время записи или обработки полностью отменяет сессию: черновик живого набора стирается, локальные и облачные операции распознавания прерываются, в историю ничего не попадает и текст не вставляется. Обычное отпускание горячей клавиши завершает диктовку штатно (финализация и вставка результата).
+
+### 8. Лимиты работы
+- **Длительность записи:** до 10 минут на сессию. При достижении лимита накопление аудио для финального прохода останавливается (live-набор продолжается).
+- **Локальный Whisper:** жёсткий таймаут 120 секунд на subprocess. Зависший или сломанный `whisper-cli` прерывается, диктовка откатывается к live/локальному тексту вместо вечного зависания.
+
 ---
 
 ## 🖥 Системные требования
@@ -68,10 +75,15 @@
 
 ## 🚀 Установка
 
-1. Скачайте образ **`SingAR 2.1.13.dmg`**.
-2. Откройте DMG и перетащите `SingAR 2.1.13.app` в папку `Applications`.
+1. Скачайте образ **`SingAR 2.2.0.dmg`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
+2. Откройте DMG и перетащите `SingAR 2.2.0.app` в папку `Applications`.
 3. Запустите приложение.
-4. При первом запуске выдайте необходимые разрешения в **Системные настройки → Конфиденциальность и безопасность → Универсальный доступ**.
+   > **Примечание при первом запуске:**
+   > - **Gatekeeper:** Так как сборка с открытым исходным кодом распространяется с ad-hoc подписью, при первом запуске нажмите по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть** (или выполните в терминале `xattr -cr "/Applications/SingAR 2.2.0.app"`).
+   > - **Связка ключей (Keychain):** При запросе доступа к `com.singar.app` введите пароль от вашего Mac и нажмите **«Разрешать всегда»** — это системный механизм macOS для безопасного сохранения ваших API-ключей.
+4. Выдайте разрешения в **Системные настройки → Конфиденциальность и безопасность**:
+   - **Микрофон** (для записи голоса)
+   - **Универсальный доступ** (для вставки распознанного текста в активное окно)
 
 ---
 
@@ -91,7 +103,17 @@ swift build
 ./scripts/build_dmg.sh
 ```
 
-Готовый подписанный образ диска появится в корне проекта: `SingAR 2.1.13.dmg`.
+Готовый подписанный образ диска появится в корне проекта: `SingAR 2.2.0.dmg`.
+
+---
+
+## 🧪 Тестирование
+
+```bash
+swift test
+```
+
+Пакет содержит тестовую цель `SingARTests` — **108 юнит-тестов** (XCTest) покрывают: нормализатор кода (`CodeLexiconNormalizer`), парсер голосовых команд, детектор речевой активности (VAD), WAV Writer, историю диктовки (включая устойчивость к повреждённому JSON), миграцию Keychain (`SecretStoreMigration`), бюджет захвата аудио (`AudioCaptureBudget`), Gate отмены (`DictationCancelGate`), AX-защиту цели вставки (`DictationFocusTargetGate`), типизированные облачные ошибки (`CloudASRError`, `GeminiLiveError`).
 
 ---
 
@@ -109,8 +131,9 @@ SingAR/
 │   ├── ASR/                       # Движки ASR (Whisper Metal, Gemini, Groq, OpenRouter)
 │   ├── Audio/                     # Захват аудио (CoreAudio, VAD, SoundFeedback)
 │   ├── Commands/                  # Голосовые команды
-│   ├── Config/                    # AppVersion (2.1.13)
+│   ├── Config/                    # AppVersion (2.2.0)
 │   ├── Dictation/                 # DictationController, Normalizer, History
+│   ├── Extensions/                  # SwiftUI-расширения (Color+Brand)
 │   ├── Hotkey/                    # Перехват глобальных горячих клавиш
 │   ├── Media/                     # Управление системным медиаплеером
 │   ├── Overlay/                   # DictationIndicator (HUD-капсула)
@@ -120,18 +143,20 @@ SingAR/
 │   ├── StatusBar/                 # StatusBarController, AppStatus
 │   ├── TextInjection/             # TextInjector (CGEvent, Pasteboard)
 │   └── Views/                     # SwiftUI Views (SettingsView, MenuBarView)
+├── Tests/
+│   └── SingARTests/               # 108 юнит-тестов (swift test)
 ```
 
 ---
 
-## 🔒 Безопасность и Приватность
+## 🔒 Privacy & Data Handling
 
-- Все пользовательские API-ключи (Google Gemini, Groq, OpenRouter) сохраняются исключительно в системном хранилище **macOS Keychain** и никогда не логируются.
-- В режиме **Local Whisper Turbo** аудиопоток обрабатывается локально на вашем GPU и не покидает пределы вашего устройства.
-- Локальные логи диагностики сохраняются в `~/Library/Application Support/SingAR/singar.log`.
+- **По умолчанию — всё локально.** Рекомендуемый режим работы — локальный **Whisper Turbo**: аудио обрабатывается на вашем устройстве (Metal GPU) и не покидает его. Сеть используется только если вы сами выбрали и настроили облачный провайдер (BYOK — Bring Your Own Key: Google Gemini, Groq, OpenRouter).
+- **Ключи — в macOS Keychain.** Все пользовательские API-ключи хранятся исключительно в системном Keychain (Legacy-значения из UserDefaults мигрируются один раз и удаляются после успешной записи) и никогда не логируются.
+- **Логи без текста диктовки.** Локальный лог `~/Library/Application Support/SingAR/singar.log` не содержит распознанного текста — вместо него пишутся только длина и короткий SHA-256-хэш. Ротация файла при достижении 1 МБ, архивы старше 7 дней удаляются (хранится максимум 1 архив).
 
 ---
 
 ## 📄 Лицензия
 
-Proprietary / Private. Все права защищены.
+Проект распространяется по лицензии [MIT](LICENSE). Copyright © 2026 SingAR contributors.

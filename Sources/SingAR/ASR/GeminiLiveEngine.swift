@@ -15,9 +15,24 @@ final class GeminiLiveEngine: ASREngine {
     private var isAlive = false
     private let lock = NSLock()
 
+    // Bounded pre-connect buffer: chunks arriving before `setupComplete` are
+    // held here; the cap (~10 s of 16 kHz mono PCM16 = 320 KB) keeps worst-case
+    // memory small even if the socket never completes setup.
+    // Overflow policy: DROP-OLDEST (not fail-fast). `feed` runs on the realtime
+    // audio-tap thread — blocking/skip-live there degrades live dictation; the
+    // oldest pre-connect audio is least valuable (speech start), so dropping it
+    // minimizes transcript loss. No WebSocket message format is affected.
+    private static let maxPendingChunks = 200
     private var pendingAudioQueue: [Data] = []
+    private var pendingDroppedCount = 0
     private var setupCompleteReceived = false
     private var completionContinuation: CheckedContinuation<String, Never>?
+
+    // Gate 2.4: last typed failure on the live path (setup/WS/HTTP status).
+    // `finalize()` still returns `String` per the ASREngine protocol, so the
+    // DictationController fallback contract (error → live text) is unchanged;
+    // this just makes the failure reason inspectable instead of log-only.
+    private var lastError: CloudASRError?
 
     init() {
         let config = URLSessionConfiguration.default
@@ -32,6 +47,22 @@ final class GeminiLiveEngine: ASREngine {
         return body()
     }
 
+    // Gate 2.4: store the first typed failure of the session; later errors
+    // (e.g. cleanup sends after teardown) never overwrite the primary cause.
+    private func recordError(_ error: CloudASRError) {
+        withLock {
+            guard lastError == nil else { return }
+            lastError = error
+        }
+    }
+
+    /// Gate 2.4: typed failure reason of the last finalize, if any.
+    /// Lets callers distinguish invalid-key/rate-limit/network from empty
+    /// speech without parsing log strings. Read-only, thread-safe.
+    func lastLiveError() -> CloudASRError? {
+        withLock { lastError }
+    }
+
     func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void) {
         let isFirst = withLock {
             self.onPartial = onPartial
@@ -42,6 +73,7 @@ final class GeminiLiveEngine: ASREngine {
                 isConnected = false
                 setupCompleteReceived = false
                 pendingAudioQueue.removeAll()
+                lastError = nil
             }
             return first
         }
@@ -57,6 +89,12 @@ final class GeminiLiveEngine: ASREngine {
                 sendAudioChunk(pcm16)
             } else {
                 pendingAudioQueue.append(pcm16)
+                // Bounded queue (drop-oldest): cap reached → evict oldest chunk.
+                while pendingAudioQueue.count > Self.maxPendingChunks {
+                    pendingAudioQueue.removeFirst()
+                    pendingDroppedCount += 1
+                    NSLog("[SingAR] Gemini Live pre-connect queue full (cap \(Self.maxPendingChunks) chunks); dropped oldest (total dropped: \(pendingDroppedCount))")
+                }
             }
         }
     }
@@ -66,11 +104,15 @@ final class GeminiLiveEngine: ASREngine {
     private func startLiveConnection() {
         guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
             NSLog("[SingAR] ⚠️ Google API key is missing for Gemini Live streaming")
+            recordError(.missingKey)
             return
         }
 
         let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=\(apiKey)"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else {
+            recordError(.emptySpeech)
+            return
+        }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
@@ -115,9 +157,10 @@ final class GeminiLiveEngine: ASREngine {
               let jsonString = String(data: data, encoding: .utf8) else { return }
 
         let message = URLSessionWebSocketTask.Message.string(jsonString)
-        webSocketTask?.send(message) { error in
+        webSocketTask?.send(message) { [weak self] error in
             if let error {
                 NSLog("[SingAR] Gemini Live setup send error: \(error)")
+                self?.recordError(CloudASRError.from(error))
             }
         }
     }
@@ -156,9 +199,10 @@ final class GeminiLiveEngine: ASREngine {
               let jsonString = String(data: data, encoding: .utf8) else { return }
 
         let message = URLSessionWebSocketTask.Message.string(jsonString)
-        webSocketTask?.send(message) { error in
+        webSocketTask?.send(message) { [weak self] error in
             if let error {
                 NSLog("[SingAR] turnComplete send error: \(error)")
+                self?.recordError(CloudASRError.from(error))
             }
         }
     }
@@ -173,6 +217,7 @@ final class GeminiLiveEngine: ASREngine {
                 self.listenForResponses() // Continue listening loop
             case .failure(let error):
                 NSLog("[SingAR] Gemini Live WebSocket receive error: \(error)")
+                self.recordError(CloudASRError.from(error))
             }
         }
     }
@@ -244,7 +289,8 @@ final class GeminiLiveEngine: ASREngine {
                 withLock {
                     if let cont = self.completionContinuation {
                         self.completionContinuation = nil
-                        let result = self.accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Gate 2.3: same lexicon normalization as every other engine.
+                        let result = CodeLexiconNormalizer.normalize(self.accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines))
                         cont.resume(returning: result)
                     }
                 }
@@ -260,8 +306,10 @@ final class GeminiLiveEngine: ASREngine {
         let deadline = Date().addingTimeInterval(0.85)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
+            // Task cancellation (Esc) must unfreeze this wait immediately;
+            // the cancelled finalize Task never needs the trailing words.
             let hasCont = withLock { self.completionContinuation == nil }
-            if !hasCont { break }
+            if !hasCont || Task.isCancelled { break }
         }
 
         withLock { isAlive = false }
@@ -274,7 +322,9 @@ final class GeminiLiveEngine: ASREngine {
         }
 
         teardown()
-        return text
+        // Gate 2.3: same lexicon normalization as every other engine's final
+        // output; idempotent, so a turnComplete-normalized result is safe.
+        return CodeLexiconNormalizer.normalize(text)
     }
 
     func cancel() {
@@ -283,6 +333,10 @@ final class GeminiLiveEngine: ASREngine {
             accumulatedText = ""
             onPartial = nil
             pendingAudioQueue.removeAll()
+            pendingDroppedCount = 0
+            // Gate 2.4: explicit session abort is a typed cancellation, unless
+            // a real failure (invalid key, network, ...) already happened.
+            if lastError == nil { lastError = .cancelled }
             completionContinuation?.resume(returning: "")
             completionContinuation = nil
         }
@@ -290,9 +344,15 @@ final class GeminiLiveEngine: ASREngine {
     }
 
     private func teardown() {
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        webSocketTask = nil
-        isConnected = false
-        setupCompleteReceived = false
+        // Mutate connection state under the lock (feed/handleMessage read it
+        // from audio/session threads); cancel the socket outside the lock.
+        let socket: URLSessionWebSocketTask? = withLock {
+            let t = webSocketTask
+            webSocketTask = nil
+            isConnected = false
+            setupCompleteReceived = false
+            return t
+        }
+        socket?.cancel(with: .normalClosure, reason: nil)
     }
 }

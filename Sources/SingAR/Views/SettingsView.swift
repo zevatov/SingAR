@@ -262,7 +262,10 @@ struct SettingsView: View {
 
                         Divider()
 
-                        Toggle("Запускать SingAR при входе в систему", isOn: $settings.launchAtLogin)
+                        Toggle("Запускать SingAR при входе в систему", isOn: Binding(
+                            get: { settings.launchAtLogin },
+                            set: { LaunchAtLoginManager.apply($0, settings: settings) }
+                        ))
                             .toggleStyle(.checkbox)
                             .font(.system(size: 12))
 
@@ -409,6 +412,7 @@ struct SettingsView: View {
         }
         .frame(minWidth: 540, minHeight: 640)
         .onAppear {
+            LaunchAtLoginManager.syncFromSystem(settings: settings)
             googleApiKey = SecretStore.get(SecretStore.Account.googleApiKey) ?? ""
             openrouterKey = SecretStore.get(SecretStore.Account.openrouterKey) ?? ""
             groqApiKey = SecretStore.get(SecretStore.Account.groqApiKey) ?? ""

@@ -1,5 +1,5 @@
 import Foundation
 
 enum AppVersion {
-    static let current = "2.1.13"
+    static let current = "2.2.0"
 }

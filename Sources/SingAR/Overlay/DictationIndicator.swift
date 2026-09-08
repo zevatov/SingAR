@@ -116,10 +116,16 @@ final class DictationIndicator {
 
     /// Update status capsule state (icon, label, spinner, waveform visibility).
     func setStatus(_ status: AppStatus) {
+        setStatus(status, message: nil)
+    }
+
+    /// Gate 1.7: same capsule, optional human-readable error detail instead of
+    /// the generic status label. No redesign — label text swap only.
+    func setStatus(_ status: AppStatus, message: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.currentStatus = status
-            self.statusLabel.stringValue = status.menuLabel
+            self.statusLabel.stringValue = message ?? status.menuLabel
 
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             if let img = NSImage(systemSymbolName: status.symbol, accessibilityDescription: status.menuLabel)?
@@ -171,9 +177,9 @@ final class DictationIndicator {
     func show(near point: NSPoint) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let width: CGFloat = 176
+            let width: CGFloat = 180
             let height: CGFloat = 40
-            let screen = NSScreen.screens.first
+            let screen = NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens.first
             let frame: NSRect
             if let screen {
                 let minX = screen.visibleFrame.minX + 10
@@ -181,7 +187,7 @@ final class DictationIndicator {
                 let x = min(max(point.x - width / 2, minX), maxX)
                 frame = NSRect(x: x, y: screen.visibleFrame.maxY - height - 6, width: width, height: height)
             } else {
-                frame = NSRect(x: point.x, y: point.y, width: width, height: height)
+                frame = NSRect(x: point.x - width / 2, y: point.y - height - 6, width: width, height: height)
             }
 
             self.panel.setFrame(frame, display: true)

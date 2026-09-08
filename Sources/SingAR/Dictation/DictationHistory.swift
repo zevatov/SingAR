@@ -14,7 +14,9 @@ final class DictationHistory: ObservableObject {
     static let shared = DictationHistory()
     static let limit = 50
 
-    private let defaults = UserDefaults.standard
+    // Injectable for testability: tests pass an isolated UserDefaults suite
+    // so user statistics (totalDictations/totalCharacters) are never touched.
+    private let defaults: UserDefaults
     private let totalDictationsKey = "totalDictations"
     private let totalCharactersKey = "totalCharacters"
 
@@ -25,7 +27,8 @@ final class DictationHistory: ObservableObject {
     private let fileURL: URL
     private let lock = NSLock()
 
-    init(fileURL: URL? = nil) {
+    init(fileURL: URL? = nil, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         if let fileURL {
             self.fileURL = fileURL
         } else {
@@ -55,6 +58,13 @@ final class DictationHistory: ObservableObject {
         defaults.set(newDictations, forKey: totalDictationsKey)
         defaults.set(newCharacters, forKey: totalCharactersKey)
 
+        // Gate 2.1: published-состояние — синхронный источник истины. Обновляется
+        // под lock до возврата из append, поэтому следующий append читает
+        // актуальные счётчики даже без вращения main run loop.
+        totalDictations = newDictations
+        totalCharacters = newCharacters
+        items = entries
+
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
@@ -66,12 +76,6 @@ final class DictationHistory: ObservableObject {
             NSLog("[SingAR] history write failed code=history_write_failed error=%@", String(describing: error))
         }
         lock.unlock()
-
-        DispatchQueue.main.async {
-            self.totalDictations = newDictations
-            self.totalCharacters = newCharacters
-            self.items = entries
-        }
     }
 
     func reload() {

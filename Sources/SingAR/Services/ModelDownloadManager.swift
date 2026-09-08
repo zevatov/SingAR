@@ -25,6 +25,24 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
         return URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }()
 
+    // MARK: Resume support
+
+    /// Resume data of an interrupted download; lets startDownload() continue
+    /// from already received bytes instead of restarting the ~1.6 GB transfer.
+    private var pendingResumeData: Data?
+
+    /// File where resumeData is persisted so an interrupted download survives app relaunch.
+    var resumeDataURL: URL {
+        modelsDirectory.appendingPathComponent("download.resumeData")
+    }
+
+    /// Additive read-only flag: an interrupted download can be continued.
+    var canResumeDownload: Bool {
+        if pendingResumeData != nil { return true }
+        if let disk = try? Data(contentsOf: resumeDataURL), !disk.isEmpty { return true }
+        return false
+    }
+
     var modelsDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return appSupport.appendingPathComponent("SingAR", isDirectory: true).appendingPathComponent("models", isDirectory: true)
@@ -43,6 +61,7 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
         // 1. Check Application Support
         if FileManager.default.fileExists(atPath: modelPath.path) {
             status = .installed(path: modelPath.path)
+            clearResumeData() // resume state is moot once the model is installed
             return
         }
 
@@ -84,18 +103,37 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
     func startDownload() {
         guard case .downloading = status else {
             try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
-            status = .downloading(progress: 0.0)
-            let task = urlSession.downloadTask(with: Self.downloadURL)
-            self.downloadTask = task
-            task.resume()
+            // Continue an interrupted download when saved resumeData exists;
+            // otherwise start a fresh task. Real progress arrives via didWriteData.
+            if let resumeData = loadPersistedResumeData() {
+                AppLogger.shared.log("⬇️ Model download: resuming from saved resumeData")
+                status = .downloading(progress: 0.0)
+                let task = urlSession.downloadTask(withResumeData: resumeData)
+                self.downloadTask = task
+                task.resume()
+            } else {
+                AppLogger.shared.log("⬇️ Model download: starting from scratch")
+                status = .downloading(progress: 0.0)
+                let task = urlSession.downloadTask(with: Self.downloadURL)
+                self.downloadTask = task
+                task.resume()
+            }
             return
         }
     }
 
     func cancelDownload() {
-        downloadTask?.cancel()
+        // Ask the session for resumeData so the download can be continued later;
+        // `data` is nil when the task cannot be resumed.
+        downloadTask?.cancel(byProducingResumeData: { [weak self] data in
+            self?.storeResumeData(data)
+        })
         downloadTask = nil
         refreshStatus()
+        // Cancel leaves a stale .downloading state behind; reflect the truth instead.
+        if case .downloading = status {
+            status = .notDownloaded
+        }
     }
 
     func deleteModel() {
@@ -103,7 +141,38 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
         if FileManager.default.fileExists(atPath: modelPath.path) {
             try? FileManager.default.removeItem(at: modelPath)
         }
+        clearResumeData()
         refreshStatus()
+    }
+
+    // MARK: Resume data storage
+
+    /// Saves resumeData in memory and on disk. In-memory copy is replaced even
+    /// when `data` is nil or empty (keeps the freshest session state).
+    private func storeResumeData(_ data: Data?) {
+        pendingResumeData = data
+        guard let data = data, !data.isEmpty else { return }
+        do {
+            try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+            try data.write(to: resumeDataURL, options: .atomic)
+        } catch {
+            AppLogger.shared.log("⚠️ Model download: failed to persist resumeData (in-memory copy kept)")
+        }
+    }
+
+    private func loadPersistedResumeData() -> Data? {
+        if let data = pendingResumeData { return data }
+        guard let data = try? Data(contentsOf: resumeDataURL), !data.isEmpty else { return nil }
+        pendingResumeData = data
+        return data
+    }
+
+    /// Removes resume state after the download succeeded or the model was deleted.
+    private func clearResumeData() {
+        pendingResumeData = nil
+        if FileManager.default.fileExists(atPath: resumeDataURL.path) {
+            try? FileManager.default.removeItem(at: resumeDataURL)
+        }
     }
 
     // MARK: URLSessionDownloadDelegate
@@ -121,6 +190,7 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
                 try FileManager.default.removeItem(at: modelPath)
             }
             try FileManager.default.moveItem(at: location, to: modelPath)
+            clearResumeData() // download finished successfully; resume state is no longer needed
             self.status = .installed(path: modelPath.path)
         } catch {
             self.status = .error("Ошибка сохранения модели: \(error.localizedDescription)")
@@ -129,10 +199,28 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            if (error as NSError).code == NSURLErrorCancelled {
+            let nsError = error as NSError
+            if nsError.code == NSURLErrorCancelled {
+                // Cancel: keep resumeData if the session produced one, then drop
+                // the stale progress state instead of showing a fake percentage.
+                if let data = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+                    storeResumeData(data)
+                }
+                downloadTask = nil
                 refreshStatus()
+                if case .downloading = status {
+                    status = .notDownloaded
+                }
             } else {
-                self.status = .error("Ошибка скачивания: \(error.localizedDescription)")
+                downloadTask = nil
+                if let data = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+                    storeResumeData(data)
+                    AppLogger.shared.log("⚠️ Model download interrupted; resumeData saved (\(data.count) bytes), can be continued")
+                    self.status = .error("Загрузка прервана — можно продолжить")
+                } else {
+                    AppLogger.shared.log("⚠️ Model download failed (code \(nsError.code)) without resumeData")
+                    self.status = .error("Ошибка скачивания: \(error.localizedDescription)")
+                }
             }
         }
     }

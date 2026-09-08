@@ -17,6 +17,11 @@ let package = Package(
         .executableTarget(
             name: "SingAR",
             path: "Sources/SingAR"
+        ),
+        .testTarget(
+            name: "SingARTests",
+            dependencies: ["SingAR"],
+            path: "Tests/SingARTests"
         )
     ]
 )

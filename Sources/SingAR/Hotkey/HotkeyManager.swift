@@ -11,6 +11,9 @@ final class HotkeyManager {
 
     private let onActivate: () -> Void
     private let onDeactivate: () -> Void
+    private let onCancel: () -> Void
+    /// Extra gate: Esc must also cancel while finalization is still in flight.
+    var canCancel: () -> Bool = { false }
     private let settings = AppSettings.shared
 
     private var globalMonitor: Any?
@@ -26,9 +29,10 @@ final class HotkeyManager {
     private var triggerFlagWasSet = false
     private var dictating = false
 
-    init(onActivate: @escaping () -> Void, onDeactivate: @escaping () -> Void) {
+    init(onActivate: @escaping () -> Void, onDeactivate: @escaping () -> Void, onCancel: @escaping () -> Void) {
         self.onActivate = onActivate
         self.onDeactivate = onDeactivate
+        self.onCancel = onCancel
     }
 
     /// Force the toggle state back to "not dictating" without calling
@@ -80,11 +84,11 @@ final class HotkeyManager {
     private func handle(_ event: NSEvent) {
         let keyCode = event.keyCode
 
-        // Esc cancels an active dictation.
-        if keyCode == UInt16(escKeyCode) && event.type == .keyDown && dictating {
-            NSLog("[SingAR] Esc pressed — cancelling dictation")
-            onDeactivate()
+        // Esc cancels an active dictation OR its still-running finalization.
+        if keyCode == UInt16(escKeyCode) && event.type == .keyDown && (dictating || canCancel()) {
+            NSLog("[SingAR] Esc pressed — cancelling dictation/processing")
             dictating = false
+            onCancel()
             return
         }
 

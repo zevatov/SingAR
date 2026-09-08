@@ -8,6 +8,12 @@ protocol ASREngine {
     /// Stream a chunk; `onPartial` fires with incremental text for live display.
     func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void)
     /// Finalize and return the complete transcript for the captured session.
+    ///
+    /// Gate 2.3 contract: the returned text is the engine's final output and
+    /// has already been passed through `CodeLexiconNormalizer.normalize`, so
+    /// every streaming path (local Speech, Gemini live) yields the same
+    /// post-normalization shape. `normalize` is idempotent, so callers may
+    /// safely re-run it on the result.
     func finalize() async -> String
     /// Stop the partial-streaming loop and drop captured audio without running
     /// a final inference. Used when dictation is aborted (e.g. focus lost).
@@ -146,7 +152,9 @@ final class SpeechEngine: ASREngine {
         }
         let deadline = Date().addingTimeInterval(0.8)
         while Date() < deadline {
-            if withLock({ gotFinal }) { break }
+            // Task cancellation (Esc) must break the wait immediately so a
+            // cancelled finalize Task never blocks for the full grace period.
+            if withLock({ gotFinal }) || Task.isCancelled { break }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
@@ -160,7 +168,10 @@ final class SpeechEngine: ASREngine {
         }
 
         await MainActor.run { [weak self] in self?.teardown() }
-        return text
+        // Gate 2.3: apply the code lexicon normalizer to the final output so
+        // the local Speech path matches every other engine's contract; also
+        // strips ASR hallucination lines.
+        return CodeLexiconNormalizer.normalize(text)
     }
 
     func cancel() {
@@ -210,25 +221,56 @@ final class CloudASR {
     // MARK: Primary Audio Transcription pass
 
     func cloudTranscribe(audio: Data) async -> String? {
+        let result = await cloudTranscribeResult(audio: audio)
+        if case .success(let text) = result { return text }
+        return nil
+    }
+
+    /// Gate 1.7: typed-error variant of `cloudTranscribe`. The legacy `String?`
+    /// API above is preserved unchanged for existing call sites; new callers
+    /// that need to surface WHY cloud failed use this one. A successful empty
+    /// string is impossible — `.emptySpeech` is returned instead.
+    ///
+    /// Gate 2.3 contract: every successful text returned here has already been
+    /// passed through `CodeLexiconNormalizer.normalize` inside each provider
+    /// (Gemini / OpenRouter / Groq / local whisper), same as the streaming
+    /// engines' `finalize()`.
+    func cloudTranscribeResult(audio: Data) async -> Result<String, CloudASRError> {
         switch settings.cloudModel {
         case .localWhisperTurbo:
-            return await transcribeWithLocalWhisper(audio: audio)
+            // Local whisper keeps its existing diagnostics; it cannot produce
+            // the cloud HTTP error taxonomy, so failures map to `.emptySpeech`.
+            let text = await transcribeWithLocalWhisper(audio: audio)
+            if let text, !text.isEmpty { return .success(text) }
+            return .failure(.emptySpeech)
         case .gemini35Transcribe:
-            return await transcribeWithGoogleGemini(audio: audio)
+            return await transcribeWithGoogleGeminiTyped(audio: audio)
         case .gpt4oTranscribe:
-            return await transcribeWithOpenRouter(audio: audio)
+            return await transcribeWithOpenRouterTyped(audio: audio)
         case .groqWhisper:
-            return await transcribeWithGroq(audio: audio)
+            return await transcribeWithGroqTyped(audio: audio)
         case .localOnly:
-            return nil
+            return .failure(.missingKey)
         }
     }
 
     // MARK: Ultra-fast Vibe-Coder Text Polish (~150-350ms)
 
+    /// Gate 2.5: legacy `String?` polish API preserved unchanged; nil now
+    /// collapses typed failures — callers needing the reason use `polishResult`.
     func polish(text: String) async -> String? {
-        guard !text.isEmpty else { return nil }
-        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else { return nil }
+        if case .success(let p) = await polishResult(text: text) { return p }
+        return nil
+    }
+
+    /// Gate 2.5: typed-error variant of `polish` (same taxonomy and fallback
+    /// contract as `cloudTranscribeResult`): HTTP / network / timeout map to
+    /// `CloudASRError`; a successful empty string is impossible —
+    /// `.emptySpeech` is returned instead. Callers keep Gate 0 behavior:
+    /// any failure means "use the unpolished transcript".
+    func polishResult(text: String) async -> Result<String, CloudASRError> {
+        guard !text.isEmpty else { return .failure(.emptySpeech) }
+        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else { return .failure(.missingKey) }
 
         let languageRule: String
         switch settings.language {
@@ -269,9 +311,9 @@ final class CloudASR {
             ]
         ]
 
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return .failure(.emptySpeech) }
         let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\(apiKey)"
-        guard let url = URL(string: urlString) else { return nil }
+        guard let url = URL(string: urlString) else { return .failure(.emptySpeech) }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -281,7 +323,13 @@ final class CloudASR {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let http = response as? HTTPURLResponse else { return .failure(.emptySpeech) }
+            guard http.statusCode == 200 else {
+                // Gate 2.5: single typed mapping for non-200 statuses.
+                let typed = CloudASRError.from(status: http.statusCode)
+                NSLog("[SingAR] ⚠️ polish: HTTP %d → %@", http.statusCode, String(describing: typed))
+                return .failure(typed)
+            }
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let candidates = json["candidates"] as? [[String: Any]],
@@ -290,16 +338,22 @@ final class CloudASR {
                   let parts = content["parts"] as? [[String: Any]],
                   let firstPart = parts.first,
                   let polishedText = firstPart["text"] as? String else {
-                return nil
+                return .failure(.emptySpeech)
             }
 
-            return polishedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = polishedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? .failure(.emptySpeech) : .success(trimmed)
         } catch {
-            return nil
+            return .failure(CloudASRError.from(error))
         }
     }
 
     // MARK: Local Whisper (Metal on Apple Silicon)
+
+    /// Hard deadline for the local whisper-cli subprocess. Long enough for the
+    /// largest supported model on Apple Silicon; short enough that a hung or
+    /// broken binary cannot stall the dictation finalize path forever.
+    private static let whisperProcessTimeout: TimeInterval = 120
 
     private func transcribeWithLocalWhisper(audio: Data) async -> String? {
         guard let modelPath = ModelDownloadManager.shared.activeModelPath else {
@@ -351,44 +405,117 @@ final class CloudASR {
         let t0 = Date()
         do {
             try process.run()
-            process.waitUntilExit()
-
-            let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
-            let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let rawOutput = String(data: outData, encoding: .utf8) ?? ""
-
-            let lines = rawOutput.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { line in
-                    !line.isEmpty &&
-                    !line.hasPrefix("whisper_") &&
-                    !line.hasPrefix("main:") &&
-                    !line.hasPrefix("system_info") &&
-                    !line.hasPrefix("ggml_")
-                }
-
-            let rawResult = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !rawResult.isEmpty {
-                // Apply local fast lexicon normalization and remove any YouTube hallucinations
-                let normalized = CodeLexiconNormalizer.normalize(rawResult)
-                AppLogger.shared.log("✅ localWhisper: raw=\"\(rawResult)\" -> normalized=\"\(normalized)\" (\(elapsed)ms)")
-                return normalized.isEmpty ? nil : normalized
-            }
-            AppLogger.shared.log("⚠️ localWhisper: empty output (\(elapsed)ms)")
-            return nil
         } catch {
-            AppLogger.shared.log("❌ localWhisper process error: \(error)")
+            AppLogger.shared.log("❌ localWhisper: failed to launch whisper-cli: \(error)")
             return nil
         }
+
+        // Drain stdout/stderr concurrently: without this a chatty child can
+        // fill the 64 KB OS pipe buffers and deadlock before it exits.
+        let stdoutTask = Task.detached(priority: .userInitiated) {
+            pipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        let stderrTask = Task.detached(priority: .userInitiated) {
+            (process.standardError as? Pipe)?.fileHandleForReading.readDataToEndOfFile()
+        }
+
+        // Bounded wait: poll running-state so a hung or broken whisper-cli can
+        // never stall the dictation finalize path forever, and so an aborted
+        // dictation Task cancels out promptly instead of blocking.
+        let deadline = Date().addingTimeInterval(Self.whisperProcessTimeout)
+        var timedOut = false
+        while process.isRunning {
+            if Task.isCancelled || Date() >= deadline {
+                timedOut = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+        }
+
+        if timedOut {
+            let reason = Task.isCancelled
+                ? "dictation task cancelled"
+                : "timeout after \(Int(Self.whisperProcessTimeout))s"
+            AppLogger.shared.log("⚠️ localWhisper: \(reason) — terminating whisper-cli (pid \(process.processIdentifier))")
+            if process.isRunning {
+                process.terminate()
+                // Short grace period, then force-kill so the subprocess can
+                // never outlive the session (SIGKILL cannot be ignored).
+                var graceMs = 0
+                while process.isRunning && graceMs < 2_000 {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    graceMs += 50
+                }
+                if process.isRunning {
+                    // SIGKILL cannot be caught or ignored — the subprocess can
+                    // never outlive the session. Harmless if it just exited.
+                    _ = kill(process.processIdentifier, SIGKILL)
+                }
+            }
+            AppLogger.shared.log("❌ localWhisper aborted (\(reason)) — falling back to live/local text")
+            return nil
+        }
+
+        // Normal completion: isRunning == false already, this returns at once.
+        process.waitUntilExit()
+        let exitCode = process.terminationStatus
+        let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+
+        guard exitCode == 0 else {
+            let stderrText = String(data: await stderrTask.value ?? Data(), encoding: .utf8) ?? ""
+            AppLogger.shared.log("❌ localWhisper: non-zero termination \(exitCode) (\(elapsed)ms) stderrLen=\(stderrText.count) — falling back to live/local text")
+            return nil
+        }
+
+        let outData = await stdoutTask.value
+        let rawOutput = String(data: outData, encoding: .utf8) ?? ""
+
+        let lines = rawOutput.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { line in
+                !line.isEmpty &&
+                !line.hasPrefix("whisper_") &&
+                !line.hasPrefix("main:") &&
+                !line.hasPrefix("system_info") &&
+                !line.hasPrefix("ggml_")
+            }
+
+        let rawResult = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rawResult.isEmpty {
+            // Gate 2.3: same lexicon normalization as every other engine —
+            // also strips YouTube hallucination lines.
+            let normalized = CodeLexiconNormalizer.normalize(rawResult)
+            AppLogger.shared.log("✅ localWhisper: ok (\(elapsed)ms, rawLen=\(rawResult.count), outLen=\(normalized.count))")
+            return normalized.isEmpty ? nil : normalized
+        }
+        AppLogger.shared.log("⚠️ localWhisper: empty output (\(elapsed)ms)")
+        return nil
     }
 
     // MARK: Google Gemini 3.5 Transcribe API
+
+    /// Gate 1.7: typed-error Gemini pass. Legacy `transcribeWithGoogleGemini`
+    /// delegates here and maps failure to `nil`, preserving its old contract.
+    private func transcribeWithGoogleGeminiTyped(audio: Data) async -> Result<String, CloudASRError> {
+        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
+            NSLog("[SingAR] ❌ cloudTranscribe: Google API Key is MISSING")
+            return .failure(.missingKey)
+        }
+        return await transcribeWithGoogleGeminiInner(audio: audio, apiKey: apiKey)
+    }
 
     private func transcribeWithGoogleGemini(audio: Data) async -> String? {
         guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
             NSLog("[SingAR] ❌ cloudTranscribe: Google API Key is MISSING")
             return nil
         }
+        if case .success(let text) = await transcribeWithGoogleGeminiInner(audio: audio, apiKey: apiKey) {
+            return text
+        }
+        return nil
+    }
+
+    private func transcribeWithGoogleGeminiInner(audio: Data, apiKey: String) async -> Result<String, CloudASRError> {
 
         NSLog("[SingAR] 🎤 cloudTranscribe: audio size = %d bytes (%.1f KB base64)", audio.count, Double(audio.count) * 4.0 / 3.0 / 1024.0)
 
@@ -435,7 +562,7 @@ final class CloudASR {
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             NSLog("[SingAR] ❌ cloudTranscribe: JSON serialization failed")
-            return nil
+            return .failure(.emptySpeech)
         }
 
         // Primary Google Gemini 3.5 Transcribe model
@@ -461,7 +588,7 @@ final class CloudASR {
                 let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
                 guard let http = response as? HTTPURLResponse else {
                     NSLog("[SingAR] ❌ cloudTranscribe: no HTTP response from %@ (%dms)", modelName, elapsed)
-                    continue
+                    return .failure(.network(underlying: URLError(.badServerResponse)))
                 }
 
                 NSLog("[SingAR] 📡 cloudTranscribe: model=%@ status=%d elapsed=%dms responseSize=%d", modelName, http.statusCode, elapsed, data.count)
@@ -484,51 +611,62 @@ final class CloudASR {
                         }
 
                         if let cleaned = extractedText?.trimmingCharacters(in: .whitespacesAndNewlines), !cleaned.isEmpty {
-                            NSLog("[SingAR] ✅ cloudTranscribe: SUCCESS model=%@ text=\"%@\" (%dms)", modelName, String(cleaned.prefix(80)), elapsed)
-                            return cleaned
+                            // Gate 2.3: same lexicon normalization as every other engine.
+                            let normalized = CodeLexiconNormalizer.normalize(cleaned)
+                            NSLog("[SingAR] ✅ cloudTranscribe: SUCCESS model=%@ len=%d (%dms)", modelName, normalized.count, elapsed)
+                            return normalized.isEmpty ? .failure(.emptySpeech) : .success(normalized)
                         } else {
                             NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ returned empty text", modelName)
-                            continue
+                            return .failure(.emptySpeech)
                         }
                     } else {
                         let rawStr = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                        NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ 200 but parse failed. Raw: %@", modelName, String(rawStr.prefix(300)))
-                        continue
+                        NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ 200 but parse failed, bodyLen=%d", modelName, rawStr.count)
+                        return .failure(.emptySpeech)
                     }
-                } else if http.statusCode == 404 {
-                    NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ returned 404", modelName)
-                    continue
-                } else if http.statusCode == 429 {
-                    NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ rate limited (429)", modelName)
-                    continue
                 } else {
-                    let rawStr = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                    NSLog("[SingAR] ❌ cloudTranscribe: model=%@ HTTP %d: %@", modelName, http.statusCode, String(rawStr.prefix(200)))
-                    continue
+                    // Gate 1.7: single typed mapping for all non-200 statuses
+                    // (was: separate 404 / 429 / else branches that all dropped
+                    // the reason on the floor and returned nil).
+                    let typed = CloudASRError.from(status: http.statusCode)
+                    NSLog("[SingAR] ⚠️ cloudTranscribe: model=%@ HTTP %d → %@", modelName, http.statusCode, String(describing: typed))
+                    return .failure(typed)
                 }
             } catch {
                 let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
                 NSLog("[SingAR] ❌ cloudTranscribe: model=%@ error after %dms: %@", modelName, elapsed, error.localizedDescription)
-                continue
+                return .failure(CloudASRError.from(error))
             }
         }
 
-        NSLog("[SingAR] ❌ cloudTranscribe: all models exhausted, returning nil")
-        return nil
+        NSLog("[SingAR] ❌ cloudTranscribe: all models exhausted, returning emptySpeech")
+        return .failure(.emptySpeech)
     }
 
     // MARK: OpenRouter Fallback
 
     private func transcribeWithOpenRouter(audio: Data) async -> String? {
         guard let key = SecretStore.get(SecretStore.Account.openrouterKey), !key.isEmpty else { return nil }
+        if case .success(let text) = await transcribeWithOpenRouterInner(audio: audio, key: key) {
+            return text
+        }
+        return nil
+    }
 
+    /// Gate 1.7: typed OpenRouter pass (HTTP statuses preserved, not flattened).
+    private func transcribeWithOpenRouterTyped(audio: Data) async -> Result<String, CloudASRError> {
+        guard let key = SecretStore.get(SecretStore.Account.openrouterKey), !key.isEmpty else { return .failure(.missingKey) }
+        return await transcribeWithOpenRouterInner(audio: audio, key: key)
+    }
+
+    private func transcribeWithOpenRouterInner(audio: Data, key: String) async -> Result<String, CloudASRError> {
         let payload: [String: Any] = [
             "model": "openai/gpt-4o-transcribe",
             "input_audio": ["data": audio.base64EncodedString(), "format": "wav"],
         ]
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return .failure(.emptySpeech) }
 
-        guard let url = URL(string: "https://openrouter.ai/api/v1/audio/transcriptions") else { return nil }
+        guard let url = URL(string: "https://openrouter.ai/api/v1/audio/transcriptions") else { return .failure(.emptySpeech) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.httpBody = body
@@ -538,14 +676,23 @@ final class CloudASR {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(.network(underlying: URLError(.badServerResponse)))
+            }
+            guard http.statusCode == 200 else {
+                let typed = CloudASRError.from(status: http.statusCode)
+                NSLog("[SingAR] ⚠️ openrouter: HTTP %d → %@", http.statusCode, String(describing: typed))
+                return .failure(typed)
+            }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let text = json["text"] as? String {
-                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Gate 2.3: same lexicon normalization as every other engine.
+                let normalized = CodeLexiconNormalizer.normalize(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                return normalized.isEmpty ? .failure(.emptySpeech) : .success(normalized)
             }
-            return nil
+            return .failure(.emptySpeech)
         } catch {
-            return nil
+            return .failure(CloudASRError.from(error))
         }
     }
 
@@ -553,8 +700,20 @@ final class CloudASR {
 
     private func transcribeWithGroq(audio: Data) async -> String? {
         guard let key = SecretStore.get(SecretStore.Account.groqApiKey), !key.isEmpty else { return nil }
+        if case .success(let text) = await transcribeWithGroqInner(audio: audio, key: key) {
+            return text
+        }
+        return nil
+    }
 
-        guard let url = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions") else { return nil }
+    /// Gate 1.7: typed Groq pass (HTTP statuses preserved, not flattened).
+    private func transcribeWithGroqTyped(audio: Data) async -> Result<String, CloudASRError> {
+        guard let key = SecretStore.get(SecretStore.Account.groqApiKey), !key.isEmpty else { return .failure(.missingKey) }
+        return await transcribeWithGroqInner(audio: audio, key: key)
+    }
+
+    private func transcribeWithGroqInner(audio: Data, key: String) async -> Result<String, CloudASRError> {
+        guard let url = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions") else { return .failure(.emptySpeech) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 10
@@ -586,16 +745,24 @@ final class CloudASR {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(.network(underlying: URLError(.badServerResponse)))
+            }
+            guard http.statusCode == 200 else {
+                let typed = CloudASRError.from(status: http.statusCode)
+                NSLog("[SingAR] ⚠️ groqWhisper: HTTP %d → %@", http.statusCode, String(describing: typed))
+                return .failure(typed)
+            }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let text = json["text"] as? String {
-                let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                NSLog("[SingAR] ✅ groqWhisper: SUCCESS text=\"%@\" (%dms)", String(cleaned.prefix(80)), elapsed)
-                return cleaned
+                // Gate 2.3: same lexicon normalization as every other engine.
+                let normalized = CodeLexiconNormalizer.normalize(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                NSLog("[SingAR] ✅ groqWhisper: SUCCESS len=%d (%dms)", normalized.count, elapsed)
+                return normalized.isEmpty ? .failure(.emptySpeech) : .success(normalized)
             }
-            return nil
+            return .failure(.emptySpeech)
         } catch {
-            return nil
+            return .failure(CloudASRError.from(error))
         }
     }
 }

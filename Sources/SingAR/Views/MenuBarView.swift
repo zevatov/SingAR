@@ -189,6 +189,18 @@ struct MenuBarView: View {
                         Text("Нажмите для копирования")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary.opacity(0.7))
+                        Button {
+                            DispatchQueue.main.async {
+                                NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
+                                WindowManager.shared.showHistory()
+                            }
+                        } label: {
+                            Image(systemName: "macwindow")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Открыть историю в отдельном окне")
                     }
 
                     let entries = Array(history.items.reversed().prefix(8))
