@@ -42,7 +42,9 @@ test/
 .build-gate01-verify/
 архив версий/
 
-# Local handbooks and private backlogs
+# Local handbooks, handoffs and private backlogs
 *handbook*
+*handoff*
+HANDOFF*
 docs/local-*
 
