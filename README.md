@@ -5,9 +5,11 @@
 **Высокопроизводительный нативный голосовой ввод и vibe-кодинг для macOS**
 
 [![macOS](https://img.shields.io/badge/macOS-14.0%2B-black?style=flat&logo=apple)](https://apple.com)
-[![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138?style=flat&logo=swift)](https://swift.org)
+[![Swift](https://img.shields.io/badge/Swift-6.0%2B-F05138?style=flat&logo=swift)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-0078D7?style=flat)](https://developer.apple.com/metal/)
-[![Version](https://img.shields.io/badge/version-2.2.0-brightgreen.svg)](https://github.com/zevatov/SingAR)
+[![Tests](https://img.shields.io/badge/tests-131%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.2.4-brightgreen.svg)](https://github.com/zevatov/SingAR/releases)
 
 </div>
 
@@ -18,6 +20,17 @@
 **SingAR** — это сверхбыстрый, легковесный инструмент голосового ввода, созданный специально для разработчиков и вайбкодеров. Приложение живет в строке меню macOS, работает без иконки в Dock и вызывается по нажатию одной клавиши (по умолчанию — **Правый ⌥ Option** или **Fn / Globe**).
 
 Приложение мгновенно расшифровывает речь, форматирует технический сленг, команды консоли, переменные `camelCase` / `snake_case` и пути к файлам, после чего вставляет готовый чистовик в активное окно редактора (Cursor, VS Code, Xcode, Терминал, браузер) за **1 миллисекунду**.
+
+---
+
+## 📊 Сравнение ASR-движков
+
+| Движок | Где выполняется | Задержка | Приватность | Идеально для |
+|---|---|---|---|---|
+| **Whisper Turbo** | Metal GPU (Локально) | ~1.2 с | 100% Offline | Поездки, конфиденциальный код, 0 ключей |
+| **Groq Whisper** | Облако (Groq LPU) | ~500 мс | Cloud | Максимальная скорость диктовки |
+| **Gemini 3.5** | Google AI Studio | ~1.0 с | Cloud (Free) | Длинные фразы, русский сленг, точность |
+| **GPT-4o Audio** | OpenRouter | ~1.5 с | Cloud | Сложный код, редкие термины и аббревиатуры |
 
 ---
 
@@ -75,11 +88,11 @@
 
 ## 🚀 Установка
 
-1. Скачайте образ **`SingAR 2.2.0.dmg`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
-2. Откройте DMG и перетащите `SingAR 2.2.0.app` в папку `Applications`.
+1. Скачайте образ **`SingAR 2.2.4.dmg`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
+2. Откройте DMG и перетащите `SingAR 2.2.4.app` в папку `Applications`.
 3. Запустите приложение.
    > **Примечание при первом запуске:**
-   > - **Gatekeeper:** Так как сборка с открытым исходным кодом распространяется с ad-hoc подписью, при первом запуске нажмите по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть** (или выполните в терминале `xattr -cr "/Applications/SingAR 2.2.0.app"`).
+   > - **Gatekeeper:** Так как сборка с открытым исходным кодом распространяется с ad-hoc подписью, при первом запуске нажмите по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть** (или выполните в терминале `xattr -cr "/Applications/SingAR 2.2.4.app"`).
    > - **Связка ключей (Keychain):** При запросе доступа к `com.singar.app` введите пароль от вашего Mac и нажмите **«Разрешать всегда»** — это системный механизм macOS для безопасного сохранения ваших API-ключей.
 4. Выдайте разрешения в **Системные настройки → Конфиденциальность и безопасность**:
    - **Микрофон** (для записи голоса)
@@ -103,7 +116,7 @@ swift build
 ./scripts/build_dmg.sh
 ```
 
-Готовый подписанный образ диска появится в корне проекта: `SingAR 2.2.0.dmg`.
+Готовый подписанный образ диска появится в корне проекта: `SingAR 2.2.4.dmg`.
 
 ---
 
@@ -113,38 +126,38 @@ swift build
 swift test
 ```
 
-Пакет содержит тестовую цель `SingARTests` — **108 юнит-тестов** (XCTest) покрывают: нормализатор кода (`CodeLexiconNormalizer`), парсер голосовых команд, детектор речевой активности (VAD), WAV Writer, историю диктовки (включая устойчивость к повреждённому JSON), миграцию Keychain (`SecretStoreMigration`), бюджет захвата аудио (`AudioCaptureBudget`), Gate отмены (`DictationCancelGate`), AX-защиту цели вставки (`DictationFocusTargetGate`), типизированные облачные ошибки (`CloudASRError`, `GeminiLiveError`).
+Пакет содержит тестовую цель `SingARTests` — **131 юнит-тест** (XCTest) покрывают: Zero-Race буфер обмена (`TextInjector`), нативное AX-замещение текста (`DictationFocusTargetGate`), защиту от галлюцинаций Whisper (`CodeLexiconNormalizer`), режим свободной многозадачности (`FocusGuard`), нормализатор кода, парсер голосовых команд, детектор речевой активности (VAD), WAV Writer, историю диктовки, миграцию Keychain (`SecretStoreMigration`), бюджет захвата аудио (`AudioCaptureBudget`), Gate отмены (`DictationCancelGate`), AX-защиту цели вставки, типизированные облачные ошибки (`CloudASRError`, `GeminiLiveError`), Smart Media Resume CoreAudio + MediaRemote и Apple Fluid Droplet индикатор.
 
 ---
 
-## 📂 Структура проекта
+## 📁 Структура проекта
 
 ```text
 SingAR/
-├── Package.swift                  # Конфигурация Swift PM
-├── Resources/
-│   └── SingAR.entitlements        # Entitlements (Audio, Hardened Runtime)
+├── .github/                   # CI/CD Workflows и Issue Templates
+├── docs/                      # Документация, Release Notes, Roadmap
+├── Resources/                 # AppIcon, Entitlements
 ├── scripts/
-│   └── build_dmg.sh               # Скрипт сборки DMG с авто-версионированием
+│   └── build_dmg.sh           # Скрипт сборки DMG с авто-версионированием
 ├── Sources/SingAR/
-│   ├── App/                       # Точка входа, AppDelegate, Жизненный цикл
-│   ├── ASR/                       # Движки ASR (Whisper Metal, Gemini, Groq, OpenRouter)
-│   ├── Audio/                     # Захват аудио (CoreAudio, VAD, SoundFeedback)
-│   ├── Commands/                  # Голосовые команды
-│   ├── Config/                    # AppVersion (2.2.0)
-│   ├── Dictation/                 # DictationController, Normalizer, History
-│   ├── Extensions/                  # SwiftUI-расширения (Color+Brand)
-│   ├── Hotkey/                    # Перехват глобальных горячих клавиш
-│   ├── Media/                     # Управление системным медиаплеером
-│   ├── Overlay/                   # DictationIndicator (HUD-капсула)
-│   ├── Permissions/               # PermissionChecker (TCC / Privacy)
-│   ├── Services/                  # AppLogger, ModelDownloadManager, WindowManager
-│   ├── Settings/                  # AppSettings, SecretStore (Keychain)
-│   ├── StatusBar/                 # StatusBarController, AppStatus
-│   ├── TextInjection/             # TextInjector (CGEvent, Pasteboard)
-│   └── Views/                     # SwiftUI Views (SettingsView, MenuBarView)
+│   ├── App/                   # Точка входа, AppDelegate, Жизненный цикл
+│   ├── ASR/                   # Движки ASR (Whisper Metal, Gemini, Groq, OpenRouter)
+│   ├── Audio/                 # Захват аудио (CoreAudio, VAD, SoundFeedback)
+│   ├── Commands/              # Голосовые команды
+│   ├── Config/                # AppVersion (2.2.4)
+│   ├── Dictation/             # DictationController, Normalizer, History
+│   ├── Extensions/            # SwiftUI-расширения (Color+Brand)
+│   ├── Hotkey/                # Перехват глобальных горячих клавиш
+│   ├── Media/                 # Управление системным медиаплеером
+│   ├── Overlay/               # DictationIndicator (HUD-капсула)
+│   ├── Permissions/           # PermissionChecker (TCC / Privacy)
+│   ├── Services/              # AppLogger, ModelDownloadManager, WindowManager
+│   ├── Settings/              # AppSettings, SecretStore (Keychain)
+│   ├── StatusBar/             # StatusBarController, AppStatus
+│   ├── TextInjection/         # TextInjector (CGEvent, Pasteboard)
+│   └── Views/                 # SwiftUI Views (SettingsView, MenuBarView)
 ├── Tests/
-│   └── SingARTests/               # 108 юнит-тестов (swift test)
+│   └── SingARTests/           # 131 юнит-тест (swift test)
 ```
 
 ---

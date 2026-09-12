@@ -35,10 +35,19 @@ models/
 .vscode/
 .idea/
 .Trash/
+*.xcuserdatad
+*.xcuserstate
+.swiftpm/
+
+# Logs & Diagnostics
+*.log
+logs/
 
 # Scratch & temporary
 1/
 test/
+scratch/
+.scratch/
 .build-gate01-verify/
 архив версий/
 

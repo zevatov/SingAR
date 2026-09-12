@@ -63,27 +63,96 @@ enum CodeLexiconNormalizer {
         (#"(?i)\bхэндл\s*клик\b"#, "handleClick")
     ]
 
-    private static let hallucinationPatterns: [String] = [
+    private static let standaloneHallucinationPatterns: [String] = [
         #"^(?i)\s*продолжу\.?\s*$"#,
         #"^(?i)\s*продолжение следует\.?\s*$"#,
         #"^(?i)\s*спасибо за просмотр\.?\s*$"#,
-        #"^(?i)\s*субтитры (сделал|подготовил)[^\n]*$"#,
+        #"^(?i)\s*субтитры\b[^\n]*$"#,
         #"^(?i)\s*редактор субтитров[^\n]*$"#,
+        #"^(?i)\s*корректор[^\n]*$"#,
         #"^(?i)\s*копирайтер[^\n]*$"#,
         #"^(?i)\s*переведено[^\n]*$"#,
-        #"^(?i)\s*тишина\.?\s*$"#
+        #"^(?i)\s*перевод (и )?озвучк[а-я]*[^\n]*$"#,
+        #"^(?i)\s*тишина\.?\s*$"#,
+        #"^(?i)\s*dimatorzok[^\n]*$"#,
+        #"^(?i)\s*дима торжок[^\n]*$"#,
+        #"^(?i)\s*(елена |ольга )?вадимов[а-я]*[^\n]*$"#,
+        #"^(?i)\s*семкин[^\n]*$"#,
+        #"^(?i)\s*егоров[а-я]*[^\n]*$"#,
+        #"^[\s.,…\-_–—]+$"# // only dots/punctuation
     ]
 
-    static func cleanHallucinations(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for pattern in hallucinationPatterns {
+    private static let trailingHallucinationRegex = try! NSRegularExpression(
+        pattern: #"(?i)(?:[.!?\n]+\s*)(?:субтитры(?:\s+(?:создавал|сделал|подготовил|добавил))?.*|dimatorzok.*|дима\s+торжок.*|редактор\s+субтитров.*|корректор.*|(?:перевод[а-я]*\s*:?\s*)?(?:елена\s+|ольга\s+)?вадимов[а-я]*.*|семкин.*|егоров[а-я]*.*|продолжение\s+следует.*|спасибо\s+за\s+просмотр.*|перевод[а-я]*\s+и\s+озвучк[а-я]*.*)$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let falsePositivePrefixRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:как|что|про|о|об|написал|сказал|выведи|сообщение|фильм|сериал|был|была|были|зовут)\s*[:"«']?\s*$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let phantomDotsRegex = try! NSRegularExpression(
+        pattern: #"(?:\s*[\.]{2,}|\s*…)+\s*$"#,
+        options: []
+    )
+
+    /// Checks if a single standalone line is a known Whisper hallucination artifact.
+    static func isHallucinationLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        for pattern in standaloneHallucinationPatterns {
             if let regex = try? NSRegularExpression(pattern: pattern) {
                 let range = NSRange(trimmed.startIndex..., in: trimmed)
                 if regex.firstMatch(in: trimmed, options: [], range: range) != nil {
-                    return ""
+                    return true
                 }
             }
         }
+        return false
+    }
+
+    /// Strips full-string hallucinations, trailing subtitle noise, and phantom ellipses.
+    static func cleanHallucinations(_ text: String) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        // 1. Check if the entire string matches a standalone hallucination pattern
+        if isHallucinationLine(trimmed) {
+            return ""
+        }
+
+        // 2. Normalize trailing phantom dots ("... ...", "…", "....") -> single dot
+        let dotRange = NSRange(trimmed.startIndex..., in: trimmed)
+        if phantomDotsRegex.firstMatch(in: trimmed, options: [], range: dotRange) != nil {
+            let replaced = phantomDotsRegex.stringByReplacingMatches(in: trimmed, options: [], range: dotRange, withTemplate: ".")
+            trimmed = replaced.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // 3. Trailing subtitle/credits trimming strictly after a sentence terminator (. ! ? \n)
+        let fullRange = NSRange(trimmed.startIndex..., in: trimmed)
+        if let match = trailingHallucinationRegex.firstMatch(in: trimmed, options: [], range: fullRange) {
+            let matchRange = match.range
+            if matchRange.location > 0 {
+                let nsTrimmed = trimmed as NSString
+                let prefix = nsTrimmed.substring(to: matchRange.location)
+                let prefixTrimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Check false positive guard
+                let prefixNs = prefixTrimmed as NSString
+                let checkRange = NSRange(location: 0, length: prefixNs.length)
+                let isProtected = falsePositivePrefixRegex.firstMatch(in: prefixTrimmed, options: [], range: checkRange) != nil
+
+                if !isProtected {
+                    var cleanedPrefix = prefixTrimmed
+                    if !cleanedPrefix.hasSuffix(".") && !cleanedPrefix.hasSuffix("!") && !cleanedPrefix.hasSuffix("?") && !cleanedPrefix.hasSuffix(";") {
+                        cleanedPrefix += "."
+                    }
+                    trimmed = cleanedPrefix
+                }
+            }
+        }
+
         return trimmed
     }
 

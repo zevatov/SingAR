@@ -49,6 +49,9 @@ final class DictationController {
     // before every mutation; any unverifiable state denies (no bundle
     // fallback for writes).
     private let focusTargetGate = DictationFocusTargetGate()
+    /// Option Б: when focus shifts away in multitasking mode (!stopOnFocusLoss),
+    /// live typing is immediately suppressed and the draft erased to prevent lag/freezes.
+    private var liveTypingSuppressedDueToFocusShift = false
 
     /// Gate 2.6: production finalize decision — history/success HUD only for a
     /// genuinely allowed insertion attempt; rejected focus ⇒ no success.
@@ -204,19 +207,21 @@ final class DictationController {
         recordingStartedAt = Date()
         lastLiveText = ""
         hasLiveTyped = false
+        liveTypingSuppressedDueToFocusShift = false
+        injector.cancelPendingRestore()
         logStage("recording", startedAt: recordingStartedAt)
 
-        // Smart Media Pause (immediately pause, track if playback was active)
+        // Smart Media Pause: only pause if media is actively playing right now
         if settings.pauseMedia {
             let gen = sessionGeneration
-            media.isMediaPlaying { [weak self] isPlaying in
-                // Only the live session may claim the pause marker: a callback
-                // landing after stop/cancel (or a newer session's start) must
-                // never arm a later resume.
-                guard let self, isPlaying, self.isDictating, self.sessionGeneration == gen else { return }
-                self.pausedMediaGeneration = gen
+            if media.isAnyMediaPlaying() {
+                // Audio was actively playing: record generation and pause
+                pausedMediaGeneration = gen
+                media.pauseBackgroundMedia()
+            } else {
+                // Audio was already paused: do nothing
+                pausedMediaGeneration = nil
             }
-            media.pauseBackgroundMedia()
         }
 
         vad.reset()
@@ -303,10 +308,37 @@ final class DictationController {
         let transcribingStartedAt = Date()
         let recordingDurationMs = Int(Date().timeIntervalSince(recordingStartedAt) * 1000)
         logStage("recording", startedAt: recordingStartedAt, completed: true)
-        logStage("transcribing", startedAt: transcribingStartedAt)
-
         SoundFeedback.stop()
         resumeMediaIfNeeded()
+
+        // Silence / Noise Hallucination Gate:
+        // If no human speech was detected during the recording session (vad.hasSpoken == false),
+        // abort immediately. Skip cloud/local ASR entirely and do not insert garbage.
+        if !vad.hasSpoken {
+            AppLogger.shared.log("🔇 stopDictation: no speech detected (vad.hasSpoken == false) — skipping ASR and injection")
+            audio.stop()
+            localAsr.cancel()
+            geminiAsr?.cancel()
+            if hasLiveTyped && !lastLiveText.isEmpty {
+                let range = NSRange(location: 0, length: (lastLiveText as NSString).length)
+                if !focusTargetGate.replaceText(generation: gen, range: range, with: "") {
+                    injector.backspace(count: range.length)
+                }
+                lastLiveText = ""
+                hasLiveTyped = false
+            }
+            statusBar.setStatus(.failed)
+            indicator.setStatus(.failed, message: "Речь не обнаружена")
+            cancelGate.finalizeFinished(gen: gen)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self, self.sessionGeneration == gen else { return }
+                self.indicator.hide()
+                self.statusBar.setStatus(.idle)
+            }
+            return
+        }
+
+        logStage("transcribing", startedAt: transcribingStartedAt)
 
         // Transition to Processing state in both capsule indicator and status bar
         statusBar.setStatus(.recognizing)
@@ -440,6 +472,13 @@ final class DictationController {
                     // PRE-DMG-FIX: final insertion requires THIS session's
                     // captured target, re-verified now (PID + semantic
                     // identity + settable). No bundle fallback.
+                    if !self.settings.stopOnFocusLoss, let targetPID = self.focusTargetGate.capturedPID {
+                        if let targetApp = NSRunningApplication(processIdentifier: targetPID), !targetApp.isActive {
+                            AppLogger.shared.log("🪟 focus guard disabled: re-activating original target app (PID=\(targetPID))")
+                            targetApp.activate()
+                            usleep(100_000)
+                        }
+                    }
                     switch Self.insertionDecision(focusAllowed: self.focusTargetGate.canMutate(generation: gen) == nil) {
                     case .insertAndRecord:
                         break
@@ -591,6 +630,7 @@ final class DictationController {
         audio.stop()
         SoundFeedback.stop()
         indicator.hide()
+        injector.cancelPendingRestore()
 
         // Gate 0.3 + PRE-DMG-FIX: erase the session-owned live draft only when
         // the session's captured target is still verified AND the caret sits
@@ -612,6 +652,7 @@ final class DictationController {
         focusTargetGate.invalidate(generation: genBeforeCancel)
         lastLiveText = ""
         hasLiveTyped = false
+        liveTypingSuppressedDueToFocusShift = false
 
         // Only cancel engines owned by the recording session; a stale
         // finalization cleanup must not touch a new session's engines.
@@ -633,12 +674,15 @@ final class DictationController {
     // MARK: Real-time Live Typing Engine
 
     private func handleLivePartial(_ newText: String) {
-        guard isDictating, settings.livePartials else { return }
+        guard isDictating, settings.livePartials, !liveTypingSuppressedDueToFocusShift else { return }
         // Gate 1.5 + PRE-DMG-FIX: live keystrokes/backspaces require THIS
         // session's captured, re-verified target right now (PID + semantic
         // identity, trusted AX, no secure input). Foreign/unverifiable ⇒ skip.
         let gen = sessionGeneration
         if let denial = focusTargetGate.canMutate(generation: gen) {
+            if !settings.stopOnFocusLoss && !liveTypingSuppressedDueToFocusShift {
+                suppressLiveTypingDueToFocusShift()
+            }
             NSLog("[SingAR] live partial skipped: target not verifiable (\(denial.rawValue))")
             return
         }
@@ -658,9 +702,17 @@ final class DictationController {
 
         var commonPrefixLength = 0
         while commonPrefixLength < oldChars.count &&
-              commonPrefixLength < newChars.count &&
-              oldChars[commonPrefixLength] == newChars[commonPrefixLength] {
-            commonPrefixLength += 1
+              commonPrefixLength < newChars.count {
+            if oldChars[commonPrefixLength] == newChars[commonPrefixLength] {
+                commonPrefixLength += 1
+            } else if commonPrefixLength == 0 &&
+                      oldChars[0].lowercased() == newChars[0].lowercased() {
+                // Speech engine changed capitalization of word 0 (e.g. SFSpeech/Gemini):
+                // preserve already-typed character to prevent erasing entire sentence!
+                commonPrefixLength += 1
+            } else {
+                break
+            }
         }
 
         let backspacesNeeded = oldChars.count - commonPrefixLength
@@ -670,7 +722,7 @@ final class DictationController {
 
         if backspacesNeeded > 0 {
             injector.backspace(count: backspacesNeeded)
-            usleep(10000) // 10ms pause between deletions and keystrokes
+            usleep(35000) // 35ms pause ensures target editor fully settles caret before typing
         }
         if !charsToType.isEmpty {
             injector.typeText(charsToType)
@@ -678,6 +730,25 @@ final class DictationController {
 
         lastLiveText = cleaned
         hasLiveTyped = true
+    }
+
+    /// Option Б: when target window loses focus during multitasking mode (!stopOnFocusLoss),
+    /// immediately suppress any future live typing to prevent lag/freezes, and attempt to
+    /// erase any live draft already typed into the target editor.
+    private func suppressLiveTypingDueToFocusShift() {
+        guard !liveTypingSuppressedDueToFocusShift else { return }
+        liveTypingSuppressedDueToFocusShift = true
+        AppLogger.shared.log("🪟 focus shifted in multitasking mode — suppressing live typing for remainder of session")
+        if hasLiveTyped && !lastLiveText.isEmpty {
+            let range = NSRange(location: 0, length: (lastLiveText as NSString).length)
+            if focusTargetGate.replaceText(generation: sessionGeneration, range: range, with: "") {
+                AppLogger.shared.log("🪟 live draft erased immediately via AX upon focus shift")
+                lastLiveText = ""
+                hasLiveTyped = false
+            } else {
+                AppLogger.shared.log("🪟 live draft preserved for atomic replace/paste upon session finish")
+            }
+        }
     }
 
     /// Guaranteed atomic application of polished text upon dictation finish.
@@ -688,10 +759,17 @@ final class DictationController {
         guard !polished.isEmpty else { return }
         guard polished != lastLiveText else { return }
 
+        // Mode 1 & 2: Try native AX atomic in-place replacement (0ms, 0 backspaces, 0 clipboard touch)
+        if ownedRange.length > 0 && focusTargetGate.replaceText(generation: sessionGeneration, range: ownedRange, with: polished) {
+            AppLogger.shared.log("⚡️ applyPolishedText: native AX atomic replace succeeded (0ms)")
+            lastLiveText = polished
+            return
+        }
+
         // Safely erase exactly the verified owned window:
         if ownedRange.length > 0 {
             injector.backspace(count: ownedRange.length)
-            usleep(25000) // 25ms pause for target editor to cleanly process deletions
+            usleep(35000) // 35ms pause for target editor to cleanly process deletions
         }
 
         // Atomically paste the clean polished text (zero character drops, zero race conditions)
@@ -703,12 +781,23 @@ final class DictationController {
 
     private func startFocusMonitoring() {
         focusCheckTimer?.invalidate()
-        focusCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self, self.isDictating else { return }
-            if let denial = self.focusTargetGate.canMutate(generation: self.sessionGeneration) {
-                NSLog("[SingAR] focused target lost (\(denial.rawValue)) — stopping dictation")
-                self.onFocusLost?()
-                self.stopDictation()
+        if settings.stopOnFocusLoss {
+            focusCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self, self.isDictating else { return }
+                if let denial = self.focusTargetGate.canMutate(generation: self.sessionGeneration) {
+                    NSLog("[SingAR] focused target lost (\(denial.rawValue)) — stopping dictation")
+                    self.onFocusLost?()
+                    self.stopDictation()
+                }
+            }
+        } else {
+            focusCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                guard let self, self.isDictating else { return }
+                if !self.liveTypingSuppressedDueToFocusShift {
+                    if self.focusTargetGate.canMutate(generation: self.sessionGeneration) != nil {
+                        self.suppressLiveTypingDueToFocusShift()
+                    }
+                }
             }
         }
     }

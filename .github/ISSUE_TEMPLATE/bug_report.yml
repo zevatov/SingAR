@@ -1,0 +1,81 @@
+name: 🐛 Сообщение об ошибке (Bug Report)
+description: Сообщить о баге, неожиданном поведении или сбое в работе SingAR
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что помогаете делать SingAR лучше! Пожалуйста, заполните форму ниже.
+  - type: input
+    id: version
+    attributes:
+      label: Версия SingAR
+      description: Укажите версию приложения (например, v2.2.0)
+      placeholder: v2.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Версия macOS
+      options:
+        - macOS 15 Sequoia
+        - macOS 14 Sonoma
+        - Другая
+    validations:
+      required: true
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Модель Apple Silicon
+      options:
+        - Apple M1 / Pro / Max / Ultra
+        - Apple M2 / Pro / Max / Ultra
+        - Apple M3 / Pro / Max
+        - Apple M4 / Pro / Max
+        - Intel Mac
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Активный движок ASR
+      options:
+        - Локальный Whisper Turbo (Metal GPU)
+        - Google Gemini 3.5 Transcribe
+        - Groq Whisper Large v3
+        - OpenRouter GPT-4o Transcribe
+        - Apple Speech (Offline)
+    validations:
+      required: true
+  - type: textarea
+    id: target_app
+    attributes:
+      label: Целевое приложение ввода
+      description: В каком приложении происходил ввод (Cursor, VS Code, Obsidian, Xcode, Terminal, Chrome и т.д.)?
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Описание проблемы
+      description: Что именно пошло не так?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Шаги для воспроизведения
+      description: Как повторить эту ошибку по шагам?
+      placeholder: |
+        1. Нажать хоткей Right Option
+        2. Надиктовать текст...
+        3. Отпустить клавишу
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи (singar.log)
+      description: Строки из ~/Library/Application Support/SingAR/singar.log (текст приватный, логируются только длины и хэши)

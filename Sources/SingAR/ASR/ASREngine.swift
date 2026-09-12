@@ -477,7 +477,8 @@ final class CloudASR {
                 !line.hasPrefix("whisper_") &&
                 !line.hasPrefix("main:") &&
                 !line.hasPrefix("system_info") &&
-                !line.hasPrefix("ggml_")
+                !line.hasPrefix("ggml_") &&
+                !CodeLexiconNormalizer.isHallucinationLine(line)
             }
 
         let rawResult = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)

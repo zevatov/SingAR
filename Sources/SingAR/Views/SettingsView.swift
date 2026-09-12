@@ -9,8 +9,8 @@ struct SettingsView: View {
     @State private var googleApiKey = ""
     @State private var openrouterKey = ""
     @State private var groqApiKey = ""
-    @State private var isVerifyingKey = false
-    @State private var keyStatus: KeyValidationStatus = .untested
+    @State private var verifyingAccounts: Set<String> = []
+    @State private var keyStatusMap: [String: KeyValidationStatus] = [:]
 
     @State private var isMicGranted = false
     @State private var isAccessibilityGranted = false
@@ -274,6 +274,18 @@ struct SettingsView: View {
                         Toggle("Приостанавливать музыку и видео во время речи", isOn: $settings.pauseMedia)
                             .toggleStyle(.checkbox)
                             .font(.system(size: 12))
+
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Toggle("Защита ввода: останавливать запись при смене окна", isOn: $settings.stopOnFocusLoss)
+                                .toggleStyle(.checkbox)
+                                .font(.system(size: 12))
+                            Text("Если выключено, можно говорить и свободно переключаться между окнами/сайтами, а текст вставится при завершении записи.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 18)
+                        }
                     }
                     .padding(14)
                     .background(Color.brandCard)
@@ -436,7 +448,6 @@ struct SettingsView: View {
         return Button {
             withAnimation(.easeInOut(duration: 0.18)) {
                 settings.cloudModel = model
-                keyStatus = .untested
             }
             verifyCurrentKey()
         } label: {
@@ -550,7 +561,10 @@ struct SettingsView: View {
         keyBinding: Binding<String>,
         account: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let isVerifying = verifyingAccounts.contains(account)
+        let status = keyStatusMap[account] ?? .untested
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(keyTitle)
                     .font(.system(size: 12, weight: .medium))
@@ -568,13 +582,13 @@ struct SettingsView: View {
                     .font(.system(size: 11))
                     .onChange(of: keyBinding.wrappedValue) { _, newValue in
                         SecretStore.set(newValue, for: account)
-                        keyStatus = .untested
+                        keyStatusMap[account] = .untested
                     }
 
                 Button(action: {
-                    verifyCurrentKey()
+                    verifyKey(for: account)
                 }) {
-                    if isVerifyingKey {
+                    if isVerifying {
                         ProgressView()
                             .controlSize(.small)
                             .frame(width: 60)
@@ -585,30 +599,42 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                .disabled(keyBinding.wrappedValue.isEmpty || isVerifyingKey)
+                .disabled(keyBinding.wrappedValue.isEmpty || isVerifying)
             }
 
-            // Key Validation Status Feedback
-            switch keyStatus {
-            case .untested:
-                EmptyView()
-            case .valid:
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(Color.brandGreen)
-                        .font(.system(size: 12))
-                    Text("Ключ \(serviceName) активен и проверен")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Color.brandGreen)
-                }
-            case .invalid(let err):
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                        .font(.system(size: 12))
-                    Text("Ошибка: \(err)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.red)
+            // Key Validation Status Feedback & Keychain Security
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Text("Keychain macOS")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                switch status {
+                case .untested:
+                    EmptyView()
+                case .valid:
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(Color.brandGreen)
+                            .font(.system(size: 11))
+                        Text("Ключ \(serviceName) проверен")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(Color.brandGreen)
+                    }
+                case .invalid(let err):
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                            .font(.system(size: 11))
+                        Text("Ошибка: \(err)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.red)
+                            .lineLimit(1)
+                    }
                 }
             }
         }
@@ -703,16 +729,30 @@ struct SettingsView: View {
         }
     }
 
+    private func verifyKey(for account: String) {
+        switch account {
+        case SecretStore.Account.googleApiKey:
+            verifyGeminiKey()
+        case SecretStore.Account.groqApiKey:
+            verifyGroqKey()
+        case SecretStore.Account.openrouterKey:
+            verifyOpenRouterKey()
+        default:
+            break
+        }
+    }
+
     private func verifyGeminiKey() {
+        let account = SecretStore.Account.googleApiKey
         guard !googleApiKey.isEmpty else { return }
-        isVerifyingKey = true
-        keyStatus = .untested
+        verifyingAccounts.insert(account)
+        keyStatusMap[account] = .untested
 
         Task {
             guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(googleApiKey)") else {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid("Некорректный ключ")
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
                 }
                 return
             }
@@ -725,38 +765,39 @@ struct SettingsView: View {
                 let http = response as? HTTPURLResponse
                 let code = http?.statusCode ?? 0
                 await MainActor.run {
-                    self.isVerifyingKey = false
+                    self.verifyingAccounts.remove(account)
                     if code == 200 {
-                        self.keyStatus = .valid
+                        self.keyStatusMap[account] = .valid
                     } else {
                         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                            let err = json["error"] as? [String: Any],
                            let msg = err["message"] as? String {
-                            self.keyStatus = .invalid(msg)
+                            self.keyStatusMap[account] = .invalid(msg)
                         } else {
-                            self.keyStatus = .invalid("HTTP \(code)")
+                            self.keyStatusMap[account] = .invalid("HTTP \(code)")
                         }
                     }
                 }
             } catch {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid(error.localizedDescription)
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid(error.localizedDescription)
                 }
             }
         }
     }
 
     private func verifyGroqKey() {
+        let account = SecretStore.Account.groqApiKey
         guard !groqApiKey.isEmpty else { return }
-        isVerifyingKey = true
-        keyStatus = .untested
+        verifyingAccounts.insert(account)
+        keyStatusMap[account] = .untested
 
         Task {
             guard let url = URL(string: "https://api.groq.com/openai/v1/models") else {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid("Некорректный ключ")
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
                 }
                 return
             }
@@ -770,38 +811,39 @@ struct SettingsView: View {
                 let http = response as? HTTPURLResponse
                 let code = http?.statusCode ?? 0
                 await MainActor.run {
-                    self.isVerifyingKey = false
+                    self.verifyingAccounts.remove(account)
                     if code == 200 {
-                        self.keyStatus = .valid
+                        self.keyStatusMap[account] = .valid
                     } else {
                         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                            let err = json["error"] as? [String: Any],
                            let msg = err["message"] as? String {
-                            self.keyStatus = .invalid(msg)
+                            self.keyStatusMap[account] = .invalid(msg)
                         } else {
-                            self.keyStatus = .invalid("HTTP \(code)")
+                            self.keyStatusMap[account] = .invalid("HTTP \(code)")
                         }
                     }
                 }
             } catch {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid(error.localizedDescription)
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid(error.localizedDescription)
                 }
             }
         }
     }
 
     private func verifyOpenRouterKey() {
+        let account = SecretStore.Account.openrouterKey
         guard !openrouterKey.isEmpty else { return }
-        isVerifyingKey = true
-        keyStatus = .untested
+        verifyingAccounts.insert(account)
+        keyStatusMap[account] = .untested
 
         Task {
             guard let url = URL(string: "https://openrouter.ai/api/v1/auth/key") else {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid("Некорректный ключ")
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
                 }
                 return
             }
@@ -815,23 +857,23 @@ struct SettingsView: View {
                 let http = response as? HTTPURLResponse
                 let code = http?.statusCode ?? 0
                 await MainActor.run {
-                    self.isVerifyingKey = false
+                    self.verifyingAccounts.remove(account)
                     if code == 200 {
-                        self.keyStatus = .valid
+                        self.keyStatusMap[account] = .valid
                     } else {
                         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                            let err = json["error"] as? [String: Any],
                            let msg = err["message"] as? String {
-                            self.keyStatus = .invalid(msg)
+                            self.keyStatusMap[account] = .invalid(msg)
                         } else {
-                            self.keyStatus = .invalid("HTTP \(code)")
+                            self.keyStatusMap[account] = .invalid("HTTP \(code)")
                         }
                     }
                 }
             } catch {
                 await MainActor.run {
-                    self.isVerifyingKey = false
-                    self.keyStatus = .invalid(error.localizedDescription)
+                    self.verifyingAccounts.remove(account)
+                    self.keyStatusMap[account] = .invalid(error.localizedDescription)
                 }
             }
         }

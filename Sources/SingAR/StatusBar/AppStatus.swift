@@ -13,8 +13,8 @@ enum AppStatus: Equatable {
         case .idle:         return "mic.fill"
         case .listening:    return "mic.fill"
         case .recognizing:  return "sparkles"
-        case .inserting:    return "square.and.arrow.down.fill"
-        case .failed:       return "exclamationmark.triangle.fill"
+        case .inserting:    return "doc.on.doc.fill"
+        case .failed:       return "xmark.circle.fill"
         }
     }
 

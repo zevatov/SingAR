@@ -87,6 +87,7 @@ final class AppSettings: ObservableObject {
         static let cloudModel      = "cloudModel"
         static let language        = "language"
         static let launchAtLogin   = "launchAtLogin"
+        static let stopOnFocusLoss = "stopOnFocusLoss"
     }
 
     // MARK: Bool toggles
@@ -108,6 +109,9 @@ final class AppSettings: ObservableObject {
     }
     @Published var launchAtLogin: Bool {
         didSet { defaults.set(launchAtLogin, forKey: Key.launchAtLogin); fire() }
+    }
+    @Published var stopOnFocusLoss: Bool {
+        didSet { defaults.set(stopOnFocusLoss, forKey: Key.stopOnFocusLoss); fire() }
     }
     @Published var cloudCleanup: Bool {
         didSet { defaults.set(cloudCleanup, forKey: Key.cloudCleanup); fire() }
@@ -141,6 +145,7 @@ final class AppSettings: ObservableObject {
             Key.cloudModel:      CloudModel.gemini35Transcribe.rawValue,
             Key.language:        ASRLanguage.auto.rawValue,
             Key.launchAtLogin:   false,
+            Key.stopOnFocusLoss: true,
         ])
 
         self.enabled = defaults.bool(forKey: Key.enabled)
@@ -149,6 +154,7 @@ final class AppSettings: ObservableObject {
         self.livePartials = defaults.bool(forKey: Key.livePartials)
         self.pauseMedia = defaults.bool(forKey: Key.pauseMedia)
         self.launchAtLogin = defaults.bool(forKey: Key.launchAtLogin)
+        self.stopOnFocusLoss = defaults.object(forKey: Key.stopOnFocusLoss) as? Bool ?? true
         self.cloudCleanup = defaults.object(forKey: Key.cloudCleanup) as? Bool ?? true
 
         self.mode = DictationMode(rawValue: defaults.string(forKey: Key.mode) ?? "") ?? .toggle

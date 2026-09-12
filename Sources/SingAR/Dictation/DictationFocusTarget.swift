@@ -41,6 +41,11 @@ protocol AXFocusProbing: AnyObject {
     func isProcessTrusted() -> Bool
     func isSecureEventInput() -> Bool
     func readFocusedFacts() -> FocusedElementFacts?
+    func replaceText(in range: NSRange, with text: String) -> Bool
+}
+
+extension AXFocusProbing {
+    func replaceText(in range: NSRange, with text: String) -> Bool { false }
 }
 
 /// Why a mutation was denied. Never contains user content.
@@ -147,6 +152,13 @@ final class DictationFocusTargetGate {
             }
         }
         return nil
+    }
+
+    /// Attempts atomic in-memory replacement of the verified draft range via Accessibility API.
+    /// Returns true if the target editor accepted the replacement directly (0ms, 0 backspaces).
+    func replaceText(generation: Int, range: NSRange, with text: String) -> Bool {
+        guard canMutate(generation: generation) == nil else { return false }
+        return probe.replaceText(in: range, with: text)
     }
 }
 
@@ -270,5 +282,39 @@ final class LiveAXFocusProbe: AXFocusProbing {
         var range = CFRange()
         guard AXValueGetValue(cf as! AXValue, .cfRange, &range) else { return nil }
         return NSRange(location: range.location, length: range.length)
+    }
+
+    func replaceText(in range: NSRange, with text: String) -> Bool {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              frontApp.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            return false
+        }
+        let appElem = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var focusedCF: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElem, kAXFocusedUIElementAttribute as CFString, &focusedCF) == .success,
+              let focusedCF, CFGetTypeID(focusedCF) == AXUIElementGetTypeID() else {
+            return false
+        }
+        let elem = focusedCF as! AXUIElement
+
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let rangeVal = AXValueCreate(.cfRange, &cfRange) else { return false }
+
+        // Set the selection range to the target draft range
+        let setRangeStatus = AXUIElementSetAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, rangeVal)
+        guard setRangeStatus == .success else { return false }
+
+        // Attempt direct atomic replacement of selected text
+        let setTextStatus = AXUIElementSetAttributeValue(elem, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+        if setTextStatus != .success {
+            // If atomic replacement is not supported, collapse selection back to caret
+            // at the end of the draft so fallback Backspaces safely delete backwards!
+            var caretRange = CFRange(location: range.location + range.length, length: 0)
+            if let caretVal = AXValueCreate(.cfRange, &caretRange) {
+                _ = AXUIElementSetAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, caretVal)
+            }
+            return false
+        }
+        return true
     }
 }

@@ -189,6 +189,17 @@ struct MenuBarView: View {
                         Text("Нажмите для копирования")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary.opacity(0.7))
+
+                        Button {
+                            history.clear()
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Очистить историю")
+
                         Button {
                             DispatchQueue.main.async {
                                 NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
@@ -280,7 +291,7 @@ struct MenuBarView: View {
                         WindowManager.shared.showSettings()
                     }
                 } label: {
-                    Label("Настройки", systemImage: "gearshape")
+                    Label("Настройки (⌘,)", systemImage: "gearshape")
                         .font(.system(size: 11, weight: .medium))
                         .frame(maxWidth: .infinity)
                 }
@@ -314,9 +325,21 @@ struct MenuBarView: View {
     }
 
     private func formatTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        let diff = Date().timeIntervalSince(date)
+        if diff < 60 {
+            return "только что"
+        } else if diff < 3600 {
+            return "\(Int(diff / 60)) мин назад"
+        } else if Calendar.current.isDateInToday(date) {
+            let formatter = DateFormatter()
+            formatter.timeStyle = .short
+            return formatter.string(from: date)
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            formatter.timeStyle = .short
+            return formatter.string(from: date)
+        }
     }
 
     private func shortEngineTitle(_ model: CloudModel) -> String {

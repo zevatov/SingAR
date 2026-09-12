@@ -51,5 +51,43 @@ final class CodeLexiconNormalizerTests: XCTestCase {
 
     func testNormalizeOfHallucinationReturnsEmpty() {
         XCTAssertEqual(CodeLexiconNormalizer.normalize("спасибо за просмотр"), "")
+        XCTAssertEqual(CodeLexiconNormalizer.normalize("Субтитры создавал DimaTorzok"), "")
+        XCTAssertEqual(CodeLexiconNormalizer.normalize("..."), "")
+        XCTAssertEqual(CodeLexiconNormalizer.normalize("... ..."), "")
+    }
+
+    func testTrailingHallucinationsStripped() {
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Создай кнопку и добавь обработчик клика. Субтитры создавал DimaTorzok"),
+            "Создай кнопку и добавь обработчик клика."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Привет мир. Спасибо за просмотр"),
+            "Привет мир."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Сделай коммит. Редактор субтитров А. Семкин, корректор А. Егорова"),
+            "Сделай коммит."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Привет мир... ..."),
+            "Привет мир."
+        )
+    }
+
+    func testFalsePositiveHallucinationsProtected() {
+        // Legitimate user speech must NOT be stripped when preceded by conjunctions or verbs
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Напиши историю о том, как субтитры создавал Дима Торжок"),
+            "Напиши историю о том, как субтитры создавал Дима Торжок"
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Выведи в лог сообщение: продолжение следует"),
+            "Выведи в лог сообщение: продолжение следует"
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Автором перевода была Вадимова"),
+            "Автором перевода была Вадимова"
+        )
     }
 }

@@ -8,6 +8,15 @@ final class TextInjector {
 
     private let pasteboard = NSPasteboard.general
 
+    private var pendingRestoreItem: DispatchWorkItem?
+    private var lastInjectedText: String?
+
+    /// Cancels any scheduled clipboard restore work item from prior insertions.
+    func cancelPendingRestore() {
+        pendingRestoreItem?.cancel()
+        pendingRestoreItem = nil
+    }
+
     /// Type a string character-by-character. Each char becomes a keyDown/keyUp
     /// pair, so the text appears live in the field as if the user typed it.
     func typeText(_ text: String) {
@@ -22,7 +31,7 @@ final class TextInjector {
             down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
             down?.post(tap: .cghidEventTap)
             up?.post(tap: .cghidEventTap)
-            usleep(2500) // 2.5ms delay ensures characters are ordered in target app
+            usleep(2000) // 2ms delay ensures characters are ordered in target app
         }
     }
 
@@ -30,36 +39,65 @@ final class TextInjector {
     func backspace(count: Int) {
         guard count > 0 else { return }
         let source = CGEventSource(stateID: .hidSystemState)
+        // 3ms delay ensures heavy Electron and native editors never drop backspaces
+        let delayMicros: useconds_t = 3000
         // 0x33 = Delete/Backspace key code.
         for _ in 0..<count {
             let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
             let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
             down?.post(tap: .cghidEventTap)
             up?.post(tap: .cghidEventTap)
-            usleep(4000) // 4ms delay ensures target editor actually deletes the character
+            usleep(delayMicros)
         }
     }
 
     /// Paste text via the pasteboard + Cmd+V. Used for final results, multiline,
-    /// or when typeText isn't suitable. Preserves the user's clipboard.
+    /// or when typeText isn't suitable. Preserves the user's clipboard with
+    /// zero-race changeCount validation and pending restore cancellation.
     func insert(_ text: String) {
         guard !text.isEmpty else { return }
 
-        let savedItems = pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
-            var dict: [NSPasteboard.PasteboardType: Data] = [:]
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    dict[type] = data
+        // Invalidate any previously pending clipboard restore so sessions don't collide
+        cancelPendingRestore()
+
+        // If the pasteboard currently holds our own previous insertion, do not
+        // capture it as user clipboard content (prevents endless loop).
+        let currentString = pasteboard.string(forType: .string)
+        let isOurPreviousInjection = (lastInjectedText != nil && currentString == lastInjectedText)
+
+        let savedItems: [[NSPasteboard.PasteboardType: Data]]
+        if isOurPreviousInjection {
+            savedItems = []
+        } else {
+            savedItems = pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
+                var dict: [NSPasteboard.PasteboardType: Data] = [:]
+                for type in item.types {
+                    if let data = item.data(forType: type) {
+                        dict[type] = data
+                    }
                 }
-            }
-            return dict.isEmpty ? nil : dict
-        } ?? []
+                return dict.isEmpty ? nil : dict
+            } ?? []
+        }
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        lastInjectedText = text
+        let expectedChangeCount = pasteboard.changeCount
+
         postPaste()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [savedItems] in
+        // Extended 600ms grace period ensures heavy editors (VS Code, Electron, Obsidian)
+        // have fully consumed Cmd+V before clipboard restoration starts.
+        let restoreItem = DispatchWorkItem { [weak self, savedItems, expectedChangeCount] in
+            guard let self else { return }
+            // Verify user hasn't copied anything new during the paste window.
+            guard self.pasteboard.changeCount == expectedChangeCount else {
+                NSLog("[SingAR] Clipboard changeCount changed (%ld != %ld) — user copied new content, skipping restore",
+                      self.pasteboard.changeCount, expectedChangeCount)
+                return
+            }
+            guard !savedItems.isEmpty else { return }
             self.pasteboard.clearContents()
             for dict in savedItems {
                 let item = NSPasteboardItem()
@@ -69,6 +107,9 @@ final class TextInjector {
                 self.pasteboard.writeObjects([item])
             }
         }
+
+        pendingRestoreItem = restoreItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: restoreItem)
     }
 
     /// Insert text, replacing any current selection first (Apple-dictation style).

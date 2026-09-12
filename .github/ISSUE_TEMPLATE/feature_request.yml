@@ -1,0 +1,28 @@
+name: 💡 Предложение функции (Feature Request)
+description: Предложить новую идею, движок или улучшение удобства SingAR
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Поделитесь идеей или сценарием, который сделает vibe-кодинг еще удобнее!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему решает это предложение?
+      description: Опишите текущие сложности или ограничения
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+      description: Как вы видите работу новой функции?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Рассматриваемые альтернативы
+      description: Пробовали ли другие решения или обходные пути?
