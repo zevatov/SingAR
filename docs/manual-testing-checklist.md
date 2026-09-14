@@ -20,11 +20,11 @@
 
 ## 💿 Сборка релизного DMG (v2.2.5)
 
-Скрипт: `./scripts/build_dmg.sh`
-- **Образ:** `SingAR 2.2.5.dmg` (появится в корне проекта; Размер: TBD)
+Скрипт: `./scripts/build_dmg.sh` (собрано 2026-09-14, после коммита `e0fb1d6`)
+- **Образ:** `SingAR 2.2.5.dmg` (в корне проекта; Размер: 920K)
 - **Приложение:** `SingAR 2.2.5.app` (Bundle ID: `com.singar.app`, Версия: `2.2.5`)
-- **Подпись:** Ad-hoc hardened runtime с entitlements (`Resources/SingAR.entitlements`)
-- **SHA-256:** TBD — фиксируется в `SingAR 2.2.5.dmg.sha256` после сборки
+- **Подпись:** Ad-hoc hardened runtime с entitlements (`Resources/SingAR.entitlements`); `spctl` rejection ожидаем
+- **SHA-256:** `8db1ed4fbc13d1e9c7911878f0d4d8879689f7bf214c77cee677ecdd6afa8645` — зафиксирован в `SingAR 2.2.5.dmg.sha256`, `shasum -a 256 -c` OK (предыдущий SHA `34f8e282…` недействителен)
 
 ---
 
@@ -40,6 +40,8 @@ Test Suite 'All tests' passed at 2026-09-14.
 Новые добавленные тесты:
 - [`FocusGuardAndClipboardTests.swift`](file:///Users/stanislav/Проекты/SingAR/Tests/SingARTests/FocusGuardAndClipboardTests.swift): проверка `stopOnFocusLoss`, отмены отложенного восстановления буфера и отслеживания `expectedChangeCount`.
 - [`CodeLexiconNormalizerTests.swift`](file:///Users/stanislav/Проекты/SingAR/Tests/SingARTests/CodeLexiconNormalizerTests.swift): 12 комплексных тестов на фильтрацию галлюцинаций субтитров Whisper и защиту от ложных срабатываний на валидных русских предложениях.
+
+> **⚠️ Прогон 2026-09-15 (владелец, живая установка): R2 НЕ закрыт.** Два runtime-дефекта на сборке из `SingAR 2.2.5.dmg` (SHA `8db1ed4f…`): пустое окно при запуске (Onboarding/Settings) и отказ диктовки generic-капсулой «Кликните в текстовое поле и повторите» — оба остались после `e0fb1d6` (presentation-only, гейт [`captureSessionTarget`](file:///Users/stanislav/Проекты/SingAR/Sources/SingAR/Dictation/DictationFocusTarget.swift:106) не менялся и **не ослабляется**). Evidence лога: 19× `capture refused: focus/secureInput` в `~/Library/Application Support/SingAR/singar.log`, AX granted; откат на 2.2.4 в ту же минуту — диктовка работает. Детали и статусы R1–R6: [`ref-audit-remaining-fixes.md`](ref-audit-remaining-fixes.md) §1, §1а. Интерактивный чеклист ниже оставлен `[ ]` — прогонять после устранения дефектов.
 
 ---
 

@@ -1,9 +1,10 @@
 # SingAR — Остаточные фиксы после Этапов 0–4
 
-> Финальный локальный handoff по остаточным фиксам. Дата: 2026-09-13 (обновлено 2026-09-14). Источник версии только [`AppVersion.current`](Sources/SingAR/Config/AppVersion.swift:4) = `2.2.5`.
+> Финальный локальный handoff по остаточным фиксам. Дата: 2026-09-13 (обновлено 2026-09-15). Источник версии только [`AppVersion.current`](Sources/SingAR/Config/AppVersion.swift:4) = `2.2.5`.
 > Состояние: `swift test` — 184 теста, 0 failures (сумма 141+20+13+10, evidence Этапов 0–3 в [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:1)); Этапы 0–4 **completed** в репозитории.
+> **Runtime 2.2.5 НЕ принят (прогон владельца 2026-09-15)**: пустое окно при запуске + отказ диктовки остались на живой установке после патча `e0fb1d6`; R2 **blocked**, тег/Release не ставить (§1, §1а).
 > Дистрибуция: GitHub + ad-hoc подпись, Developer ID и нотаризации нет (осознанное решение).
-> Obsidian-sync Этапов 3–4 НЕ выполнена (MCP сломан — HTTP 404 «Session not found»), долг в §3 этого файла и §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:337).
+> Obsidian-sync Этапов 3–4: закрыта триажем владельца 2026-09-14 (Stage3/Stage4 Completed созданы в vault); локальный §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:337) отстаёт — см. §3.
 > Родительский хендоф: [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:1). Код в этой задаче не менялся.
 
 ## 0. Что уже закрыто (не делать снова)
@@ -21,14 +22,29 @@
 
 | ID | Что | Зачем | Как | Acceptance |
 |---|---|---|---|---|
-| R1 | ✅ Выполнен локально: коммит `593d732` (30 файлов) | Этапы выполнены в рабочем дереве; без коммита нет воспроизводимого состояния для DMG/тега | Закоммичено код+docs Этапов 0–4 одним коммитом `593d732`; дерево после него было чистое. Текущий uncommitted bump версии 2.2.5 (docs-sync) — отдельный коммит поверх | `git status` был чист после `593d732`; `git log` содержит изменения всех scope-файлов Этапов 0–4 (списки в §3.3/§4.2/§5.2/§6.2/§7.2 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:1)) |
-| R2 | Ручной чеклист [`manual-testing-checklist.md`](docs/manual-testing-checklist.md:46) | Runtime (CGEvent/AX/Keychain/WS) автоматом не покрыт — только ручной прогон (G1-4/G2-1/G4-5) | Прогнать интерактивный чеклист на собранной сборке: хоткей Right-Option (keyCode 61) vs левый Option (58), TextEdit/VS Code вставки, Esc-отмена, офлайн-режим, Gatekeeper-обход по [`README.md`](README.md:94) | Все пункты чеклиста отмечены `[x]`; отказ-в-старте и fail-closed поведение подтверждены на живой сборке |
-| R3 | Сборка DMG `./scripts/build_dmg.sh` (не `--dry-run`) + SHA256 рядом | Полная DMG под 2.2.5 ещё не собиралась (G4-2); verify-гейт и `.sha256` в скрипте ([`build_dmg.sh`](scripts/build_dmg.sh:196)) не exercised на реальном артефакте 2.2.5 | `./scripts/build_dmg.sh` (без флагов) → дождаться `codesign --verify --deep --strict` fatal-гейта → зафиксировать `SingAR 2.2.5.dmg` + `SingAR 2.2.5.dmg.sha256`; предыдущий DMG уходит в `*.prev.dmg` (rollback-путь скрипта) | DMG создан; `.sha256` рядом; `shasum -a 256 -c` проходит; `spctl` informational-rejection ожидаем без нотаризации — не считать провалом |
-| R4 | Тег `v2.2.5` только после совпадения версии везде | Единственный источник — [`AppVersion.current`](Sources/SingAR/Config/AppVersion.swift:4); дрейф ломает [`--require-tag`](.github/workflows/ci.yml:62)-ветку CI и DMG-имена | Сверить `2.2.5` в [`AppVersion.swift`](Sources/SingAR/Config/AppVersion.swift:4), [`CHANGELOG.md`](CHANGELOG.md:8), [`release-notes-2.2.5.md`](docs/release-notes-2.2.5.md:1), DMG-имени и бейдже [`README.md`](README.md:10) → затем `git tag v2.2.5` и push | `git tag` содержит `v2.2.5`; grep версии вне allowlist пуст (см. G4-4 в §2); тег ставится строго после R2+R3 |
-| R5 | GitHub Release: DMG + `.sha256` + Gatekeeper-инструкция | Пользователи дистрибуции получают артефакт и способ его проверить без нотаризации | Создать Release для тега `v2.2.5`: приложить `SingAR 2.2.5.dmg` + `.sha256`; в описание вставить Gatekeeper-секцию из [`README.md`](README.md:94) (Control-клик → Открыть, `xattr -d com.apple.quarantine`, SHA-проверка) | Release опубликован; оба файла прикреплены; SHA в описании совпадает с `.sha256`; ссылки в README/release-notes ведут на Release |
-| R6 | Дождаться зелёного GitHub Actions (закрытие G4-3) | Прогон нового [`ci.yml`](.github/workflows/ci.yml:1) в Actions не зафиксирован — evidence только локальные | Push R1+R4 → открыть вкладку Actions → дождаться `secret-scan` → `test` (184/0) на теге; при red — чинить workflow до зелёного | Оба job зелёные на теге `v2.2.5`; скриншот/ссылка на прогон приложена к Release |
+| R1 | ✅ Выполнен: `593d732` (30 файлов) + `a385887` (bump 2.2.5 docs) + `e0fb1d6` (NSHostingController + self-frontmost refusal UX) | Воспроизводимое состояние для DMG/тега | Коммиты последовательно на локальном main; дерево исходников чистое после `e0fb1d6` | `git status` чист после `e0fb1d6`; `git log` содержит `593d732` → `a385887` → `e0fb1d6`; тега нет |
+| R2 | 🚫 **blocked (2026-09-15)**: чеклист [`manual-testing-checklist.md`](docs/manual-testing-checklist.md:46) не пройден, баги живы | Runtime (CGEvent/AX/Keychain/WS) автоматом не покрыт; прогон 2026-09-15 провален — пустое окно при запуске + отказ диктовки (детали §1а) | Устранить runtime-дефекты (владелец, через Gemini; fail-closed гейт не ослаблять), затем повторить прогон чеклиста на новой сборке: хоткей Right-Option (61) vs левый Option (58), TextEdit/VS Code вставки, Esc-отмена, офлайн-режим, Gatekeeper-обход по [`README.md`](README.md:94) | Все пункты чеклиста `[x]` на сборке, где пустое окно и отказ диктовки не воспроизводятся |
+| R3 | ✅ DMG собрана (2026-09-14, после `e0fb1d6`): `SingAR 2.2.5.dmg` 920K, SHA-256 `8db1ed4fbc13d1e9c7911878f0d4d8879689f7bf214c77cee677ecdd6afa8645`, `shasum -c` OK | Артефакт для ручного прогона; verify-гейт и `.sha256` exercised ([`build_dmg.sh`](scripts/build_dmg.sh:196)) | `./scripts/build_dmg.sh` (без флагов); ad-hoc подпись, `spctl` rejected ожидаем без нотаризации — не считать провалом | Механика сборки OK, **но релизом DMG не принимать**: при живых багах (§1а) артефакт не проходит релиз-гейт R2; при пересборке SHA обновить во всех docs (старый SHA `34f8e282…` недействителен) |
+| R4 | ⛔ Не стартовать: тег `v2.2.5` только после закрытия R2 | Тег фиксирует состояние до проверки runtime; перевыпуск тега после находок — худший сценарий | Сверка версии везде ([`AppVersion.swift`](Sources/SingAR/Config/AppVersion.swift:4), [`CHANGELOG.md`](CHANGELOG.md:8), [`release-notes-2.2.5.md`](docs/release-notes-2.2.5.md:1), DMG-имя, бейдж [`README.md`](README.md:10)) заготовлена, но `git tag` не выполнять, пока R2 blocked | Факт 2026-09-15: тега нет; ставить строго после R2+R3 |
+| R5 | ⛔ Не стартовать: GitHub Release | Пользователи не должны получать артефакт с живыми runtime-багами (§1а) | После закрытия R2: Release для тега `v2.2.5` с `SingAR 2.2.5.dmg` + `.sha256` + Gatekeeper-секция из [`README.md`](README.md:94) | Факт 2026-09-15: Release нет; публиковать строго после R2 |
+| R6 | Push `origin/main` разрешён владельцем (2026-09-15, выполняет devops после docs); Actions-прогон — после push | Ветка G4-3 (прогон [`ci.yml`](.github/workflows/ci.yml:1) в Actions) не закрыта | Push без тега разрешён отдельно от R4/R5; после push проверить Actions: `secret-scan` → `test` (184/0) | Push выполнен владельцем; тега при этом нет; при red — чинить workflow до зелёного |
 
-Порядок жёсткий: R1 → R2 → R3 → R4 → R5 → R6. Тег и Release не ставить до R2/R3.
+Порядок жёсткий: R1 → R2 → R3 → R4 → R5 → R6. Тег и Release не ставить до R2/R3. Факт 2026-09-15: R1/R3 выполнены, R2 blocked, R4–R6 заморожены; push `origin/main` разрешён владельцем отдельно и тега не создаёт.
+
+## 1а. Runtime defects 2.2.5 (2026-09-15, причина R2 blocked)
+
+Симптомы на живой установке (владелец, 2026-09-15), **оба остались после `e0fb1d6`**:
+
+1. **Пустое окно при запуске** (Onboarding/Settings). [`WindowManager`](Sources/SingAR/Services/WindowManager.swift:1) собирал контент через `NSHostingView` без layout; `e0fb1d6` перевёл на [`NSHostingController`](Sources/SingAR/Services/WindowManager.swift:28) — presentation-only правка, на живой установке не помогла.
+2. **Диктовка везде отказывает** generic-капсулой «Кликните в текстовое поле и повторите» ([`startRefusalMessage`](Sources/SingAR/Dictation/DictationController+Seams.swift:51)).
+
+Evidence (лог до патча): `~/Library/Application Support/SingAR/singar.log` — 19× `capture refused: focus/secureInput`; AX granted — `axUnavailable` не встречалось. Откат на 2.2.4 в ту же минуту — диктовка заработала (регресс принадлежит 2.2.5-цепочке).
+
+Что НЕ менял `e0fb1d6`: fail-closed гейт [`captureSessionTarget`](Sources/SingAR/Dictation/DictationFocusTarget.swift:106) — whitelist {AXTextField, AXTextArea, AXComboBox, AXSearchField} + `settable`; probe возвращает `nil` при frontmost == свой bundle. Коммит — presentation/UX-only; **фиксом его не считать**.
+
+Гипотезы (не подтверждены; диагностику ведёт владелец через Gemini): не та сборка в `/Applications` (старый бинарь), TCC mic/speech, SDK 27, иное.
+
+**Правило: fail-closed гейт НЕ ослаблять** — отказ при сомнении является designed behavior Этапа 0 (находка C2, [`DictationFocusTarget.swift`](Sources/SingAR/Dictation/DictationFocusTarget.swift:106)); починять причину отказа, а не снимать whitelist/settable-требования.
 
 ## 2. Желательно до/сразу после выкладки (маленький код/docs)
 
@@ -38,17 +54,11 @@
 | G1-3 | UX-текст в [`SettingsView`](Sources/SingAR/Views/SettingsView.swift:48) про Keychain ThisDeviceOnly и Migration Assistant | ThisDeviceOnly не покидает устройство: после переноса на новый Mac через Migration Assistant ключ не переедет — пользователь должен знать, что ключ вводится заново | Добавить подпись/тултип в секцию ключа Settings: «Ключ хранится только на этом Mac и не переносится Migration Assistant — после переноса введите ключ заново» | Текст виден в UI настроек; формулировка не обещает «синхронизацию»; регресс Этапов 0–3 не внесён |
 | G4-4 | CI grep на хардкод версии `2.2.5` вне allowlist | Дрейф версии между [`AppVersion`](Sources/SingAR/Config/AppVersion.swift:4), CHANGELOG, release-notes и бейджем ловится автоматом, а не человеком | В [`ci.yml`](.github/workflows/ci.yml:1) (job `secret-scan` или отдельный step): `grep -REnI '2\.2\.5'` по `Sources/` `scripts/` `README.md` — совпадения вне allowlist (только [`AppVersion.swift`](Sources/SingAR/Config/AppVersion.swift:4), [`CHANGELOG.md`](CHANGELOG.md:8), [`release-notes-2.2.5.md`](docs/release-notes-2.2.5.md:1)) → FATAL; имя версии в паттерн вынести в переменную шага | CI красный при подсовывании `2.2.5` в посторонний файл; зелёный на чистом дереве; allowlist задокументирован комментарием |
 
-## 3. Починить потом — Obsidian (не блокер релиза)
+## 3. Obsidian — закрыто триажем владельца 2026-09-14 (в этой задаче vault не вызывался)
 
-MCP-сервер Obsidian сломан: HTTP 404 «Session not found» (Этап 3-сессия — 5+ попыток list/read; Этап 4-сессия — vault не вызывался по решению владельца). Никаких vault_* вызовов до починки. Статус и таблица записей — в §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:337).
+История: MCP-сервер Obsidian был сломан (HTTP 404 «Session not found»: Этап 3-сессия — 5+ попыток list/read; Этап 4-сессия — vault не вызывался по решению владельца). **Триаж владельца 2026-09-14**: MCP восстановлен, записи `4_Spaces/Projects/SingAR/RefAudit_Stage3_Completed.md` и `4_Spaces/Projects/SingAR/RefAudit_Stage4_Completed.md` созданы в vault (маркеры `ZOO_PIPELINE_SINGAR_STAGE3` / `ZOO_PIPELINE_SINGAR_STAGE4`). Долг «Этапы 3–4 не синхронизированы» на стороне vault закрыт.
 
-После починки MCP (правило владельца: targeted get до записи, allowlist `4_Spaces/Projects/SingAR/`, exact marker `ZOO_PIPELINE_`, одна мутация за раз + immediate read-back):
-
-1. targeted get `4_Spaces/Projects/SingAR/RefAudit_Stage3_Pending.md` → write `4_Spaces/Projects/SingAR/RefAudit_Stage3_Completed.md` с маркером `ZOO_PIPELINE_SINGAR_STAGE3` + immediate read-back (содержание подготовлено в §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:370))
-2. targeted get `4_Spaces/Projects/SingAR/RefAudit_Stage4_Pending.md` → write `4_Spaces/Projects/SingAR/RefAudit_Stage4_Completed.md` с маркером `ZOO_PIPELINE_SINGAR_STAGE4` + immediate read-back (содержание — из §7 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:282))
-3. Обновить §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:337): blocked → written
-
-Pending-файлы `RefAudit_Stage3_Pending.md` и `RefAudit_Stage4_Pending.md` НЕ удалять (исторические). Delete/move/rename запрещены правилом владельца.
+Остаток: локальный §9 [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:337) отстаёт от факта (в таблице остались blocked-статусы) — актуализируется точечной docs-правкой handoff-файла. Pending-файлы `RefAudit_Stage3_Pending.md` и `RefAudit_Stage4_Pending.md` НЕ удалять/не переименовывать (исторические); delete/move/rename запрещены правилом владельца. Правила работы с vault прежние: targeted get до записи, allowlist vault-relative targets, exact marker `ZOO_PIPELINE_`, одна мутация за раз + immediate read-back.
 
 ## 4. Техдолг после релиза (не критично)
 
@@ -79,4 +89,4 @@ Pending-файлы `RefAudit_Stage3_Pending.md` и `RefAudit_Stage4_Pending.md` 
 
 ---
 
-*Создано 2026-09-13, docs-only задача (techwriter): код не менялся, Obsidian не вызывался (MCP сломан). Все якоря `файл:строка` проверены чтением в этой сессии: [`AppVersion.swift`](Sources/SingAR/Config/AppVersion.swift:4)=`2.2.4`; [`expectedSHA256`](Sources/SingAR/Services/ModelDownloadManager.swift:19)=`nil`; поиск ThisDeviceOnly в `Sources/SingAR/Settings|Views` — 0 вхождений UX-текста о Migration Assistant (только [`SecretStore.swift`](Sources/SingAR/Settings/SecretStore.swift:198)); `liveTypingSuppressedDueToFocusShift` — 7 вхождений (3 файла, якоря в §4); NSLog — [`AppLogger.swift`](Sources/SingAR/Services/AppLogger.swift:86) + realtime-пути. Статусы Этапов 0–4 и 184 теста — по evidence [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:1).*
+*Создано 2026-09-13; обновлено 2026-09-15 (docs-only, techwriter): шапка, R1–R6 актуализированы (R1/R3 done, R2 blocked, R4–R6 заморожены), добавлен §1а runtime defects, §3 переписан под триаж 2026-09-14; код не менялся, Obsidian в этой задаче не вызывался. Якоря §1а проверены чтением в этой сессии: [`captureSessionTarget`](Sources/SingAR/Dictation/DictationFocusTarget.swift:106), [`startRefusalMessage`](Sources/SingAR/Dictation/DictationController+Seams.swift:51), [`NSHostingController`](Sources/SingAR/Services/WindowManager.swift:28); SHA-256 — из `SingAR 2.2.5.dmg.sha256`, совпадает с владельческим. Историческая приписка 2026-09-13: якоря [`AppVersion.swift`](Sources/SingAR/Config/AppVersion.swift:4)=`2.2.4`; [`expectedSHA256`](Sources/SingAR/Services/ModelDownloadManager.swift:19)=`nil`; поиск ThisDeviceOnly в `Sources/SingAR/Settings|Views` — 0 вхождений UX-текста о Migration Assistant (только [`SecretStore.swift`](Sources/SingAR/Settings/SecretStore.swift:198)); `liveTypingSuppressedDueToFocusShift` — 7 вхождений (3 файла, якоря в §4); NSLog — [`AppLogger.swift`](Sources/SingAR/Services/AppLogger.swift:86) + realtime-пути. Статусы Этапов 0–4 и 184 теста — по evidence [`ref-audit-handoffs.md`](docs/ref-audit-handoffs.md:1).*
