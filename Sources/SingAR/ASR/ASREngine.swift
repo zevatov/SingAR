@@ -43,6 +43,22 @@ final class SpeechEngine: ASREngine {
         return body()
     }
 
+    /// Этап 2: буфер ранних кадров. `startSession`/`beginTask` асинхронны
+    /// (main-hop + авторизация + locale), а tap шлёт кадры сразу — первые
+    /// 100–200мс терялись (`request` ещё nil). Ранние кадры копятся в
+    /// `earlyFrames` (cap `maxEarlyFrames`) и сливаются в `request` при
+    /// `beginTask`. Cap защищает от unbounded-роста при denied-авторизации.
+    static let maxEarlyFrames = 32
+    private var earlyFrames: [AVAudioPCMBuffer] = []
+    /// Этап 2: offline-seam политики раннего буфера (без AVAudio/SFSpeech).
+    /// Возвращает (kept, droppedOldest) для потока входящих кадров при cap.
+    static func earlyFramePlan(incoming: Int, alreadyBuffered: Int, cap: Int = maxEarlyFrames) -> (kept: Int, droppedOldest: Int) {
+        let total = alreadyBuffered + incoming
+        guard total > cap else { return (incoming, 0) }
+        let dropped = total - cap
+        return (incoming - dropped, dropped)
+    }
+
     func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void) {
         let start = withLock {
             self.onPartial = onPartial
@@ -51,15 +67,34 @@ final class SpeechEngine: ASREngine {
                 isAlive = true
                 committedText = ""
                 segmentText = ""
+                earlyFrames.removeAll()
             }
             return s
         }
 
         if start {
+            // Первый кадр — сразу в ранний буфер синхронно (не теряется),
+            // затем асинхронный старт сессии сольёт его в request.
+            withLock {
+                earlyFrames.append(buffer)
+                while earlyFrames.count > Self.maxEarlyFrames {
+                    earlyFrames.removeFirst()
+                }
+            }
             DispatchQueue.main.async { [weak self] in self?.startSession() }
         }
         DispatchQueue.main.async { [weak self] in
-            self?.request?.append(buffer)
+            guard let self else { return }
+            if let req = self.request {
+                req.append(buffer)
+            } else {
+                self.withLock {
+                    self.earlyFrames.append(buffer)
+                    while self.earlyFrames.count > Self.maxEarlyFrames {
+                        self.earlyFrames.removeFirst()
+                    }
+                }
+            }
         }
     }
 
@@ -90,7 +125,16 @@ final class SpeechEngine: ASREngine {
         req.shouldReportPartialResults = true
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         req.addsPunctuation = settings.autoPunctuation
+        // Этап 2: слить ранние кадры (100–200мс) в свежий request — не теряются.
+        let early: [AVAudioPCMBuffer] = withLock {
+            let e = earlyFrames
+            earlyFrames.removeAll()
+            return e
+        }
         request = req
+        for buf in early {
+            req.append(buf)
+        }
         task = rec.recognitionTask(with: req) { [weak self] result, error in
             self?.handle(result: result, error: error)
         }
@@ -203,16 +247,18 @@ final class CloudASR {
     // MARK: Availability
 
     /// Cloud cleanup / ASR is available when configured for the selected model.
+    /// Этап 0: единая trim+isEmpty проверка через SecretStore.hasKey (было:
+    /// `get(...) != nil` без trim — пробельный ключ считался валидным).
     var available: Bool {
         switch settings.cloudModel {
         case .localWhisperTurbo:
             return ModelDownloadManager.shared.isModelInstalled
         case .gemini35Transcribe:
-            return SecretStore.get(SecretStore.Account.googleApiKey) != nil
+            return SecretStore.hasKey(SecretStore.Account.googleApiKey)
         case .gpt4oTranscribe:
-            return SecretStore.get(SecretStore.Account.openrouterKey) != nil
+            return SecretStore.hasKey(SecretStore.Account.openrouterKey)
         case .groqWhisper:
-            return SecretStore.get(SecretStore.Account.groqApiKey) != nil
+            return SecretStore.hasKey(SecretStore.Account.groqApiKey)
         case .localOnly:
             return false
         }
@@ -254,6 +300,33 @@ final class CloudASR {
         }
     }
 
+    // MARK: Этап 2 — отмена сети
+
+    /// Этап 2: явная отмена сети при Esc. `URLSession.shared.data(for:)` уже
+    /// наследует отмену Task, но здесь отмена проверяется ЯВНО до/после сети:
+    /// `Task.checkCancellation()` до запроса + маппинг `URLError.cancelled` →
+    /// `.cancelled` после (через `CloudASRError.from`). Поведение сохранено:
+    /// отмена = typed `.cancelled`, контроллер падает на live/local текст
+    /// (Gate 0 fallback). Все 4 сетевых пути CloudASR (polish/Gemini/
+    /// OpenRouter/Groq) идут через этот helper — отмена запроса сессии
+    /// гарантирована везде. Scope Этапа 2 — только CloudASR; verifyGeminiKey
+    /// в SettingsView (Этап 3, дебаунс) не трогаем.
+    /// Пустой ключ проверяется ЕДИНО через `SecretStore.trimmedKey`
+    /// (уже унифицировано в Этапе 0–1: пробельный ключ = `.missingKey`, без сети).
+    private func cancellableData(for req: URLRequest) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        do {
+            let result = try await URLSession.shared.data(for: req)
+            try Task.checkCancellation()
+            return result
+        } catch {
+            if error is CancellationError {
+                throw URLError(.cancelled)
+            }
+            throw error
+        }
+    }
+
     // MARK: Ultra-fast Vibe-Coder Text Polish (~150-350ms)
 
     /// Gate 2.5: legacy `String?` polish API preserved unchanged; nil now
@@ -270,7 +343,7 @@ final class CloudASR {
     /// any failure means "use the unpolished transcript".
     func polishResult(text: String) async -> Result<String, CloudASRError> {
         guard !text.isEmpty else { return .failure(.emptySpeech) }
-        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else { return .failure(.missingKey) }
+        guard let apiKey = SecretStore.trimmedKey(SecretStore.Account.googleApiKey) else { return .failure(.missingKey) }
 
         let languageRule: String
         switch settings.language {
@@ -312,17 +385,18 @@ final class CloudASR {
         ]
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return .failure(.emptySpeech) }
-        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\(apiKey)"
-        guard let url = URL(string: urlString) else { return .failure(.emptySpeech) }
+        // Этап 0: ключ только в заголовке x-goog-api-key (аналогия с Bearer),
+        // никогда в query URL — URL без секрета безопасно логировать.
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent") else { return .failure(.emptySpeech) }
 
-        var req = URLRequest(url: url)
+        var req = SecretStore.geminiRequest(url: url, apiKey: apiKey)
         req.httpMethod = "POST"
         req.httpBody = body
         req.timeoutInterval = 6
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await cancellableData(for: req)
             guard let http = response as? HTTPURLResponse else { return .failure(.emptySpeech) }
             guard http.statusCode == 200 else {
                 // Gate 2.5: single typed mapping for non-200 statuses.
@@ -498,7 +572,7 @@ final class CloudASR {
     /// Gate 1.7: typed-error Gemini pass. Legacy `transcribeWithGoogleGemini`
     /// delegates here and maps failure to `nil`, preserving its old contract.
     private func transcribeWithGoogleGeminiTyped(audio: Data) async -> Result<String, CloudASRError> {
-        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
+        guard let apiKey = SecretStore.trimmedKey(SecretStore.Account.googleApiKey) else {
             NSLog("[SingAR] ❌ cloudTranscribe: Google API Key is MISSING")
             return .failure(.missingKey)
         }
@@ -506,7 +580,7 @@ final class CloudASR {
     }
 
     private func transcribeWithGoogleGemini(audio: Data) async -> String? {
-        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
+        guard let apiKey = SecretStore.trimmedKey(SecretStore.Account.googleApiKey) else {
             NSLog("[SingAR] ❌ cloudTranscribe: Google API Key is MISSING")
             return nil
         }
@@ -572,10 +646,10 @@ final class CloudASR {
         ]
 
         for modelName in modelsToTry {
-            let urlString = "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent?key=\(apiKey)"
-            guard let url = URL(string: urlString) else { continue }
+            // Этап 0: ключ только в заголовке, URL без секрета (см. polishResult).
+            guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent") else { continue }
 
-            var req = URLRequest(url: url)
+            var req = SecretStore.geminiRequest(url: url, apiKey: apiKey)
             req.httpMethod = "POST"
             req.httpBody = body
             req.timeoutInterval = 12
@@ -585,7 +659,7 @@ final class CloudASR {
             NSLog("[SingAR] 🚀 cloudTranscribe: calling model=%@ ...", modelName)
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await cancellableData(for: req)
                 let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
                 guard let http = response as? HTTPURLResponse else {
                     NSLog("[SingAR] ❌ cloudTranscribe: no HTTP response from %@ (%dms)", modelName, elapsed)
@@ -647,7 +721,7 @@ final class CloudASR {
     // MARK: OpenRouter Fallback
 
     private func transcribeWithOpenRouter(audio: Data) async -> String? {
-        guard let key = SecretStore.get(SecretStore.Account.openrouterKey), !key.isEmpty else { return nil }
+        guard let key = SecretStore.trimmedKey(SecretStore.Account.openrouterKey) else { return nil }
         if case .success(let text) = await transcribeWithOpenRouterInner(audio: audio, key: key) {
             return text
         }
@@ -656,7 +730,7 @@ final class CloudASR {
 
     /// Gate 1.7: typed OpenRouter pass (HTTP statuses preserved, not flattened).
     private func transcribeWithOpenRouterTyped(audio: Data) async -> Result<String, CloudASRError> {
-        guard let key = SecretStore.get(SecretStore.Account.openrouterKey), !key.isEmpty else { return .failure(.missingKey) }
+        guard let key = SecretStore.trimmedKey(SecretStore.Account.openrouterKey) else { return .failure(.missingKey) }
         return await transcribeWithOpenRouterInner(audio: audio, key: key)
     }
 
@@ -676,7 +750,7 @@ final class CloudASR {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await cancellableData(for: req)
             guard let http = response as? HTTPURLResponse else {
                 return .failure(.network(underlying: URLError(.badServerResponse)))
             }
@@ -700,7 +774,7 @@ final class CloudASR {
     // MARK: Groq Whisper API
 
     private func transcribeWithGroq(audio: Data) async -> String? {
-        guard let key = SecretStore.get(SecretStore.Account.groqApiKey), !key.isEmpty else { return nil }
+        guard let key = SecretStore.trimmedKey(SecretStore.Account.groqApiKey) else { return nil }
         if case .success(let text) = await transcribeWithGroqInner(audio: audio, key: key) {
             return text
         }
@@ -709,7 +783,7 @@ final class CloudASR {
 
     /// Gate 1.7: typed Groq pass (HTTP statuses preserved, not flattened).
     private func transcribeWithGroqTyped(audio: Data) async -> Result<String, CloudASRError> {
-        guard let key = SecretStore.get(SecretStore.Account.groqApiKey), !key.isEmpty else { return .failure(.missingKey) }
+        guard let key = SecretStore.trimmedKey(SecretStore.Account.groqApiKey) else { return .failure(.missingKey) }
         return await transcribeWithGroqInner(audio: audio, key: key)
     }
 
@@ -744,7 +818,7 @@ final class CloudASR {
 
         let t0 = Date()
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await cancellableData(for: req)
             let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
             guard let http = response as? HTTPURLResponse else {
                 return .failure(.network(underlying: URLError(.badServerResponse)))

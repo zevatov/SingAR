@@ -7,7 +7,7 @@
 [![macOS](https://img.shields.io/badge/macOS-14.0%2B-black?style=flat&logo=apple)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-6.0%2B-F05138?style=flat&logo=swift)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-0078D7?style=flat)](https://developer.apple.com/metal/)
-[![Tests](https://img.shields.io/badge/tests-131%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
+[![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-2.2.4-brightgreen.svg)](https://github.com/zevatov/SingAR/releases)
 
@@ -64,8 +64,8 @@
 ### 5. Smart Media Control
 Автоматически ставит воспроизведение музыки и видео (Spotify, Apple Music, YouTube) на паузу при нажатии горячей клавиши и возобновляет звук после завершения фразы.
 
-### 6. Защита от обрезки речи (120ms CoreAudio Drain)
-Встроенный буфер задержки предотвращает проглатывание последних слогов при быстром отпускании клавиши.
+### 6. Защита от обрезки речи (VAD grace-tail)
+Встроенный «хвост тишины» (`graceSeconds = 0.7`) в детекторе речевой активности продолжает подавать аудио в распознаватель после конца речи, поэтому последнее слово успевает финализироваться даже при быстром отпускании клавиши ([VoiceActivityDetector.swift](Sources/SingAR/Audio/VoiceActivityDetector.swift:43)).
 
 ### 7. Полная отмена по Esc
 Нажатие `Esc` во время записи или обработки полностью отменяет сессию: черновик живого набора стирается, локальные и облачные операции распознавания прерываются, в историю ничего не попадает и текст не вставляется. Обычное отпускание горячей клавиши завершает диктовку штатно (финализация и вставка результата).
@@ -88,11 +88,15 @@
 
 ## 🚀 Установка
 
-1. Скачайте образ **`SingAR 2.2.4.dmg`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
+1. Скачайте образ **`SingAR 2.2.4.dmg`** и файл контрольной суммы **`SingAR 2.2.4.dmg.sha256`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
 2. Откройте DMG и перетащите `SingAR 2.2.4.app` в папку `Applications`.
 3. Запустите приложение.
-   > **Примечание при первом запуске:**
-   > - **Gatekeeper:** Так как сборка с открытым исходным кодом распространяется с ad-hoc подписью, при первом запуске нажмите по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть** (или выполните в терминале `xattr -cr "/Applications/SingAR 2.2.4.app"`).
+   > **Ad-hoc подпись — осознанный GitHub-путь (без Developer ID и нотаризации по условию владельца):**
+   > Это типично для GitHub-проектов с открытым исходным кодом. Исходники и релизы: https://github.com/zevatov/SingAR.
+   > macOS Gatekeeper при первом запуске покажет предупреждение, т.к. нотаризации нет — это ожидаемо.
+   > - **Вариант 1 (рекомендуется):** по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть**, затем **Открыть** в диалоге Gatekeeper.
+   > - **Вариант 2 (терминал):** снимите карантин `xattr -d com.apple.quarantine "/Applications/SingAR 2.2.4.app"` (точечно) или `xattr -cr "/Applications/SingAR 2.2.4.app"` (полная очистка).
+   > - **Проверка целостности:** `shasum -a 256 -c "SingAR 2.2.4.dmg.sha256"` в папке со скачанным DMG.
    > - **Связка ключей (Keychain):** При запросе доступа к `com.singar.app` введите пароль от вашего Mac и нажмите **«Разрешать всегда»** — это системный механизм macOS для безопасного сохранения ваших API-ключей.
 4. Выдайте разрешения в **Системные настройки → Конфиденциальность и безопасность**:
    - **Микрофон** (для записи голоса)
@@ -112,11 +116,15 @@ cd SingAR
 # Сборка debug-бинарника
 swift build
 
-# Сборка production DMG-установщика
+# Быстрая проверка релиз-процесса без сборки (CI dry-run)
+./scripts/build_dmg.sh --dry-run
+
+# Сборка production DMG-установщика (ad-hoc подпись, без нотаризации)
 ./scripts/build_dmg.sh
 ```
 
-Готовый подписанный образ диска появится в корне проекта: `SingAR 2.2.4.dmg`.
+Готовый образ диска появится в корне проекта: `SingAR 2.2.4.dmg` + `SingAR 2.2.4.dmg.sha256`.
+Версия (`CFBundleShortVersionString`, имя DMG) берётся только из `Sources/SingAR/Config/AppVersion.swift` (`AppVersion.current`) — хардкод-фолбэка нет, при отсутствии версии сборка падает. Предыдущий DMG сохраняется как `*.prev.dmg` для rollback.
 
 ---
 
@@ -126,7 +134,7 @@ swift build
 swift test
 ```
 
-Пакет содержит тестовую цель `SingARTests` — **131 юнит-тест** (XCTest) покрывают: Zero-Race буфер обмена (`TextInjector`), нативное AX-замещение текста (`DictationFocusTargetGate`), защиту от галлюцинаций Whisper (`CodeLexiconNormalizer`), режим свободной многозадачности (`FocusGuard`), нормализатор кода, парсер голосовых команд, детектор речевой активности (VAD), WAV Writer, историю диктовки, миграцию Keychain (`SecretStoreMigration`), бюджет захвата аудио (`AudioCaptureBudget`), Gate отмены (`DictationCancelGate`), AX-защиту цели вставки, типизированные облачные ошибки (`CloudASRError`, `GeminiLiveError`), Smart Media Resume CoreAudio + MediaRemote и Apple Fluid Droplet индикатор.
+Пакет содержит тестовую цель `SingARTests` — **184 юнит-теста** (XCTest) покрывают: Zero-Race буфер обмена (`TextInjector`), нативное AX-замещение текста (`DictationFocusTargetGate`), защиту от галлюцинаций Whisper (`CodeLexiconNormalizer`), режим свободной многозадачности (`FocusGuard`), нормализатор кода, парсер голосовых команд, детектор речевой активности (VAD), WAV Writer, историю диктовки, миграцию Keychain (`SecretStoreMigration`), бюджет захвата аудио (`AudioCaptureBudget`), Gate отмены (`DictationCancelGate`), AX-защиту цели вставки, типизированные облачные ошибки (`CloudASRError`, `GeminiLiveError`), Smart Media Resume CoreAudio + Media Remote, Apple Fluid Droplet индикатор, а также security-регрессы Этапов 0–3 ref-аудита (`Stage0SecurityFixes`, `Stage1Security`, `Stage2Stability`, `Stage3Architecture`).
 
 ---
 
@@ -157,7 +165,7 @@ SingAR/
 │   ├── TextInjection/         # TextInjector (CGEvent, Pasteboard)
 │   └── Views/                 # SwiftUI Views (SettingsView, MenuBarView)
 ├── Tests/
-│   └── SingARTests/           # 131 юнит-тест (swift test)
+│   └── SingARTests/           # 184 юнит-теста (swift test)
 ```
 
 ---

@@ -11,6 +11,17 @@ final class TextInjector {
     private var pendingRestoreItem: DispatchWorkItem?
     private var lastInjectedText: String?
 
+    /// Этап 2: CGEvent-пэйсинг вне главного потока. Все keystroke-стирания идут
+    /// через serial `injectionQueue` (фон, userInteractive) — главная только для
+    /// UI/pasteboard. Порядок FIFO: backspace-блок, вставший раньше, выполнится
+    /// раньше type-блока (оба ставятся синхронно подряд с main, без await между).
+    /// `usleep` остался, но блокирует только фоновую очередь, не main.
+    private let injectionQueue = DispatchQueue(label: "com.singar.text-injection", qos: .userInteractive)
+    /// Этап 2: settle-пауза между стиранием и печатью — в фоне, не на main
+    /// (было `usleep(35000)` на main в контроллере). Пакетная вставка: один блок
+    /// делает erase+settle+type атомарно в порядке очереди.
+    private static let settleMicros: useconds_t = 35_000
+
     /// Cancels any scheduled clipboard restore work item from prior insertions.
     func cancelPendingRestore() {
         pendingRestoreItem?.cancel()
@@ -19,35 +30,101 @@ final class TextInjector {
 
     /// Type a string character-by-character. Each char becomes a keyDown/keyUp
     /// pair, so the text appears live in the field as if the user typed it.
+    /// Этап 2: fire-and-forget в фон — возвращается сразу, не блокирует main.
     func typeText(_ text: String) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        for char in text {
-            // Use the Unicode-aware key event path: post a keyDown with the
-            // character attached. This handles Latin, Cyrillic, punctuation.
-            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
-            // Set the Unicode string on the keyDown event.
-            var chars = Array(String(char).utf16)
-            down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
-            down?.post(tap: .cghidEventTap)
-            up?.post(tap: .cghidEventTap)
-            usleep(2000) // 2ms delay ensures characters are ordered in target app
+        guard !text.isEmpty else { return }
+        injectionQueue.async {
+            let source = CGEventSource(stateID: .hidSystemState)
+            for char in text {
+                // Use the Unicode-aware key event path: post a keyDown with the
+                // character attached. This handles Latin, Cyrillic, punctuation.
+                let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+                let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                // Set the Unicode string on the keyDown event.
+                var chars = Array(String(char).utf16)
+                down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+                down?.post(tap: .cghidEventTap)
+                up?.post(tap: .cghidEventTap)
+                usleep(2000) // 2ms delay ensures characters are ordered in target app (фон)
+            }
         }
     }
 
     /// Press Backspace `count` times to erase previously-typed text (paced to avoid dropped events).
+    /// Этап 2: fire-and-forget в фон — возвращается сразу, не блокирует main.
     func backspace(count: Int) {
         guard count > 0 else { return }
-        let source = CGEventSource(stateID: .hidSystemState)
-        // 3ms delay ensures heavy Electron and native editors never drop backspaces
-        let delayMicros: useconds_t = 3000
-        // 0x33 = Delete/Backspace key code.
-        for _ in 0..<count {
-            let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
-            let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
-            down?.post(tap: .cghidEventTap)
-            up?.post(tap: .cghidEventTap)
-            usleep(delayMicros)
+        injectionQueue.async {
+            let source = CGEventSource(stateID: .hidSystemState)
+            // 3ms delay ensures heavy Electron and native editors never drop backspaces (фон)
+            let delayMicros: useconds_t = 3000
+            // 0x33 = Delete/Backspace key code.
+            for _ in 0..<count {
+                let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+                let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+                down?.post(tap: .cghidEventTap)
+                up?.post(tap: .cghidEventTap)
+                usleep(delayMicros)
+            }
+        }
+    }
+
+    /// Этап 2: пакетный финал — erase + settle (35мс в фоне) + paste на main одним
+    /// FIFO-блоком. Заменяет `backspace(); usleep(35000-на-main); insert()`.
+    /// Порядок гарантирован: `insert` вызывается на main ТОЛЬКО после завершения
+    /// стирания и settle в фоне. Main не блокируется (только короткий `insert`).
+    func eraseThenInsert(eraseCount: Int, text: String) {
+        guard eraseCount > 0 || !text.isEmpty else { return }
+        let pasteText = text
+        injectionQueue.async { [weak self] in
+            if eraseCount > 0 {
+                let source = CGEventSource(stateID: .hidSystemState)
+                for _ in 0..<eraseCount {
+                    let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+                    let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+                    down?.post(tap: .cghidEventTap)
+                    up?.post(tap: .cghidEventTap)
+                    usleep(3000)
+                }
+                usleep(Self.settleMicros) // settle в фоне, не на main
+            }
+            guard !pasteText.isEmpty else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.insert(pasteText)
+            }
+        }
+    }
+
+    /// Этап 2: пакетная живая правка — erase + settle (35мс в фоне) + type одним
+    /// FIFO-блоком. Заменяет `backspace(); usleep(35000-на-main); typeText()`.
+    /// Возвращается сразу (main свободен); `lastLiveText` контроллер обновляет
+    /// оптимистично на main до вызова.
+    func backspaceThenType(backspaces: Int, text: String) {
+        guard backspaces > 0 || !text.isEmpty else { return }
+        injectionQueue.async {
+            if backspaces > 0 {
+                let source = CGEventSource(stateID: .hidSystemState)
+                for _ in 0..<backspaces {
+                    let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+                    let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+                    down?.post(tap: .cghidEventTap)
+                    up?.post(tap: .cghidEventTap)
+                    usleep(3000)
+                }
+                usleep(Self.settleMicros) // settle в фоне, не на main
+            }
+            if !text.isEmpty {
+                let source = CGEventSource(stateID: .hidSystemState)
+                for char in text {
+                    let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+                    let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                    var chars = Array(String(char).utf16)
+                    down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+                    down?.post(tap: .cghidEventTap)
+                    up?.post(tap: .cghidEventTap)
+                    usleep(2000)
+                }
+            }
         }
     }
 
@@ -112,15 +189,6 @@ final class TextInjector {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: restoreItem)
     }
 
-    /// Insert text, replacing any current selection first (Apple-dictation style).
-    func insertReplacingSelection(_ text: String) {
-        guard !text.isEmpty else { return }
-        postKey(virtualKey: 0x33, flags: [])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-            self?.insert(text)
-        }
-    }
-
     private func postPaste() {
         let source = CGEventSource(stateID: .hidSystemState)
         let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)
@@ -135,13 +203,4 @@ final class TextInjector {
         cmdUp?.post(tap: .cghidEventTap)
     }
 
-    private func postKey(virtualKey: CGKeyCode, flags: CGEventFlags) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
-        down?.flags = flags
-        up?.flags = flags
-        down?.post(tap: .cghidEventTap)
-        up?.post(tap: .cghidEventTap)
-    }
 }

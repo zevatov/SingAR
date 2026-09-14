@@ -191,11 +191,17 @@ final class DictationIndicator {
     }
 
     /// Feed a raw mic level (0...1) to animate waveform during recording.
+    /// Этап 2: callable from ANY thread (realtime tap in production).
+    /// `currentStatus` is read ONLY on main inside the hop — never on the
+    /// caller thread — so there is no tap-vs-UI race. Values clamped 0...1.
     func setLevel(_ raw: Float) {
-        guard currentStatus == .listening else { return }
         let clamped = CGFloat(max(0, min(1, raw)))
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.panel.isVisible else { return }
+            guard let self else { return }
+            // Этап 2: thread-check — UI mutation only on main.
+            dispatchPrecondition(condition: .onQueue(.main))
+            guard self.currentStatus == .listening else { return }
+            guard self.panel.isVisible else { return }
             self.smoothedLevel += (clamped - self.smoothedLevel) * 0.4
             self.animateBars(level: self.smoothedLevel)
         }

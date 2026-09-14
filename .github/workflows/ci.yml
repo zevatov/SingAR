@@ -5,9 +5,71 @@ on:
   pull_request:
     branches: [ main ]
 
+# Version-bump checklist (single source of truth: Sources/SingAR/Config/AppVersion.swift -> AppVersion.current):
+#   1. Bump AppVersion.current (no hardcoded fallbacks anywhere — build fails if missing).
+#   2. Add a [X.Y.Z] section to CHANGELOG.md.
+#   3. Create docs/release-notes-X.Y.Z.md.
+#   4. Tag the release: git tag vX.Y.Z && git push origin vX.Y.Z
+#      (--require-tag is enforced ONLY on tag builds; regular PR/push main runs dry-run without it.)
+#   README.md badge and DMG names mention the current release — keep them in sync manually.
+
 jobs:
+  secret-scan:
+    name: Secret Scan + Release Hygiene
+    runs-on: ubuntu-latest
+    env:
+      # Scans VALUES/URLs only. The header FIELD NAME x-goog-api-key (Stage 0 canon,
+      # SecretStore.geminiKeyHeaderField) is intentionally NOT matched: keys live in
+      # headers, and we must not flag the legitimate header name itself.
+      # Patterns: repo placeholder | key in URL query | key/token params in URL | real Google API key format.
+      SECRET_SCAN_PATTERN: 'your_github_repo|\?key=|[?&](api_key|apikey|access_token|token)=|AIzaSy[A-Za-z0-9_-]{30,}'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Negative test — scanner must flag an injected leak
+        run: |
+          set -euo pipefail
+          CANARY_DIR="$(mktemp -d /tmp/leak-canary.XXXXXX)"
+          trap 'rm -rf "$CANARY_DIR"' EXIT
+          printf 'let url = "https://api.example.invalid/v1/endpoint?key=test"\n' > "$CANARY_DIR/canary.swift"
+          if grep -REnI "$SECRET_SCAN_PATTERN" "$CANARY_DIR"; then
+            echo "PASS: scanner flagged the injected leak (negative test)."
+          else
+            echo "FATAL: scanner did NOT catch the injected leak — scan logic is broken." >&2
+            exit 1
+          fi
+
+      - name: Scan Sources/ for leaked secrets (fail on any hit)
+        run: |
+          set -o pipefail
+          if grep -REnI "$SECRET_SCAN_PATTERN" Sources/; then
+            echo "FATAL: potential secrets found in Sources/ (see matches above)." >&2
+            exit 1
+          else
+            rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "FATAL: grep failed with rc=$rc" >&2
+              exit 1
+            fi
+            echo "PASS: no leaked secrets in Sources/ (0 matches)."
+          fi
+
+      - name: Release hygiene — build_dmg.sh --dry-run (no full DMG build)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build_dmg.sh
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "==> Tag build: enforcing --require-tag (tag must exist for AppVersion.current)"
+            ./scripts/build_dmg.sh --dry-run --require-tag
+          else
+            echo "==> Regular PR/push to main: dry-run WITHOUT --require-tag (release tag may not exist yet)"
+            ./scripts/build_dmg.sh --dry-run
+          fi
+
   test:
     name: Unit Tests (macOS)
+    needs: secret-scan   # block tests if a secret is found
     runs-on: macos-14
     steps:
       - name: Check out repository

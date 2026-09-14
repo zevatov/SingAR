@@ -60,7 +60,35 @@ enum FocusTargetDenial: String, Equatable, Error {
 }
 
 /// Session-scoped target gate. Main-thread use only (same as the controller).
+/// Этап 2: намеренно БЕЗ `@MainActor` — gate вызывается из `DictationController`
+/// (который `@MainActor`) синхронно на main, а offline-тесты Этапов 0–1
+/// (`Stage0SecurityFixesTests`, `DictationFocusTargetGateTests`,
+/// `StartRefusalFeedbackTests`, `FocusGuardAndClipboardTests`) держат его в
+/// синхронном nonisolated-контексте. `nonisolated` pure-seams
+/// (`editableRoles`/`isEditableRole`) — без main; остальное — только с main
+/// (контроллер гарантирует; audio/WS-потоки сюда не ходят — там только
+/// thread-safe VAD/engines). Полная `@MainActor`-изоляция гейта отложена до
+/// Этапа 3 (декомпозиция контроллера) чтобы не ломать 161 тест.
 final class DictationFocusTargetGate {
+    /// Этап 0: fail-closed whitelist ролей текстовых полей. Дефолт — запрет;
+    /// разрешены только явные редактируемые роли. AXStaticText/AXButton/
+    /// AXWindow/AXApplication/AXFocusedUIElement-фолбэки всегда denied
+    /// (даже при isValueSettable == true от фейкового/битого probe).
+    /// Этап 2: `nonisolated` — чистая константа/проверка без состояния.
+    nonisolated static let editableRoles: Set<String> = [
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXSearchField"
+    ]
+
+    /// Fail-closed проверка роли: nil или вне whitelist ⇒ false.
+    /// Этап 2: `nonisolated` — pure, тесты без main.
+    nonisolated static func isEditableRole(_ role: String?) -> Bool {
+        guard let role else { return false }
+        return editableRoles.contains(role)
+    }
+
     private let probe: AXFocusProbing
 
     private(set) var capturedGeneration = 0
@@ -82,8 +110,9 @@ final class DictationFocusTargetGate {
         guard probe.isProcessTrusted() else { return false }
         guard !probe.isSecureEventInput() else { return false }
         guard let facts = probe.readFocusedFacts() else { return false }
+        // Этап 0: дефолт — запрет. Только явный settable-флаг + whitelist ролей.
         guard facts.isValueSettable else { return false }
-        guard facts.identity.role != nil else { return false }
+        guard Self.isEditableRole(facts.identity.role) else { return false }
         capturedGeneration = generation
         capturedPID = facts.pid
         capturedIdentity = facts.identity
@@ -107,8 +136,17 @@ final class DictationFocusTargetGate {
         }
         guard probe.isProcessTrusted() else { return .axUnavailable }
         guard !probe.isSecureEventInput() else { return .secureInput }
-        guard let facts = probe.readFocusedFacts(), facts.isValueSettable else {
+        guard let facts = probe.readFocusedFacts() else {
             return .noFocusedElement
+        }
+        // Этап 0: fail-closed — не-settable или роль вне whitelist ⇒ deny.
+        // Роль проверяется ДО pid/identity, чтобы AXButton/AXWindow/AXStaticText
+        // отклонялись как foreignTarget даже при совпадении pid.
+        guard facts.isValueSettable else {
+            return .noFocusedElement
+        }
+        guard Self.isEditableRole(facts.identity.role) else {
+            return .foreignTarget
         }
         guard facts.pid == capturedPID, facts.identity == capturedIdentity else {
             return .foreignTarget
@@ -213,12 +251,20 @@ final class LiveAXFocusProbe: AXFocusProbing {
             }
         }
 
-        var isSettable = true
+        // Этап 0: fail-closed инверсия (было fail-open: дефолт true + deny
+        // только для AXStaticText с явным false). Теперь дефолт — запрет;
+        // разрешён только явный AX-success + settable==true. AXStaticText
+        // никогда не редактируем (defense-in-depth, whitelist в гейте тоже
+        // отклонит). Ошибка AX API ⇒ false.
+        var isSettable = false
         var settable = DarwinBoolean(false)
         if AXUIElementIsAttributeSettable(targetElement, kAXValueAttribute as CFString, &settable) == .success {
-            if !settable.boolValue && identity.role == "AXStaticText" {
-                isSettable = false
-            }
+            isSettable = settable.boolValue
+        } else {
+            isSettable = false
+        }
+        if identity.role == "AXStaticText" {
+            isSettable = false
         }
 
         return FocusedElementFacts(

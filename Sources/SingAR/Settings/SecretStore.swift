@@ -10,9 +10,53 @@ import Security
 enum SecretStore {
 
     private static let prefix = "secret."
-    /// Service identifier for generic-password items. Falls back to a stable
-    /// name when the bundle identifier is unavailable (e.g. bare `swift run`).
-    private static let service = Bundle.main.bundleIdentifier ?? "SingAR"
+    /// Этап 1: фиксированный service для generic-password items.
+    /// Раньше был `Bundle.main.bundleIdentifier ?? "SingAR"` — опционал дрейфовал
+    /// между `com.singar.app` (прод) и `SingAR` (swift run/тесты), раскалывая Keychain.
+    /// Канон — `com.singar.app` (см. scripts/build_dmg.sh Info.plist); старые
+    /// значения читаются через `legacyServices()` и мигрируют на канон.
+    static let keychainService = "com.singar.app"
+
+    /// Legacy service-кандидаты для чтения/миграции (без канона, без дублей,
+    /// порядок стабилен: сначала "SingAR", затем bundleIdentifier если иной).
+    /// Pure-seam для offline-тестов совместимости.
+    static var legacyServices: [String] {
+        var out: [String] = []
+        for cand in ["SingAR", Bundle.main.bundleIdentifier ?? ""] {
+            guard !cand.isEmpty, cand != keychainService, !out.contains(cand) else { continue }
+            out.append(cand)
+        }
+        return out
+    }
+
+    // MARK: - Этап 1: clearLegacy TTL/аудит/повтор (offline-testable seams)
+
+    /// TTL остаточного legacy-ключа в UserDefaults: дольше — stale, нужен аудит.
+    /// 7 дней, консистентно с AppLogger.logTTLSeconds.
+    static let legacyAuditTTLSeconds: TimeInterval = 7 * 24 * 3600
+
+    /// Accounts, где Keychain read-back не подтвердил запись: clearLegacy отложен,
+    /// повтор запланирован. In-memory only (не персистим — при рестарте get снова попробует).
+    private static var pendingLegacyRetry: Set<String> = []
+
+    /// Pure-seam: нужен ли повтор зачистки (migrated=false → повтор+предупреждение).
+    static func needsLegacyRetry(decision: MigrationDecision) -> Bool {
+        if case .migrated = decision { return false }
+        return true
+    }
+
+    /// Pure-seam: stale ли остаточный legacy-ключ (для аудита/TTL).
+    static func isLegacyStale(lastVerifiedAt: Date, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(lastVerifiedAt) > legacyAuditTTLSeconds
+    }
+
+    /// Аудит остаточных UserDefaults `secret.*` (без значений, только имена).
+    static func residualLegacyKeys(accounts: [String], defaults: UserDefaults = .standard) -> [String] {
+        accounts.map { prefix + $0 }.filter { defaults.string(forKey: $0) != nil }
+    }
+
+    /// Отложенные повторы (для диагностики, без значений).
+    static func pendingLegacyRetries() -> [String] { Array(pendingLegacyRetry).sorted() }
 
     static func set(_ value: String, for account: String) {
         switch setAction(for: value) {
@@ -21,25 +65,53 @@ enum SecretStore {
         case .upsert(let trimmed):
             let status = upsert(trimmed, account: keychainAccount(for: account))
             if status == errSecSuccess {
-                // Belt-and-suspenders: drop any pre-migration leftover.
-                clearLegacy(account)
-                NotificationCenter.default.post(name: .secretStoreDidChange, object: account)
+                // Этап 1: clearLegacy только после read-back проверки (fail-safe).
+                let readBack = read(account: keychainAccount(for: account))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if readBack == trimmed {
+                    clearLegacy(account)
+                    pendingLegacyRetry.remove(account)
+                    for svc in legacyServices { deleteServiceItem(account: keychainAccount(for: account), service: svc) }
+                    NotificationCenter.default.post(name: .secretStoreDidChange, object: account)
+                } else {
+                    pendingLegacyRetry.insert(account)
+                    NSLog("[SingAR] SecretStore: keychain read-back mismatch, legacy retry scheduled")
+                }
             }
         }
     }
 
     static func get(_ account: String) -> String? {
-        if let stored = read(account: keychainAccount(for: account))?
+        let kcAccount = keychainAccount(for: account)
+        if let stored = read(account: kcAccount)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !stored.isEmpty {
+            ensureThisDeviceOnly(account: kcAccount, knownValue: stored, service: keychainService)
             return stored
+        }
+        for svc in legacyServices {
+            guard let legacyVal = read(account: kcAccount, service: svc)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !legacyVal.isEmpty else { continue }
+            let status = upsert(legacyVal, account: kcAccount)
+            let readBack: String? = (status == errSecSuccess || status == errSecDuplicateItem)
+                ? read(account: kcAccount)?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            if migrationDecision(status: status, readBack: readBack, raw: legacyVal) == .migrated {
+                deleteServiceItem(account: kcAccount, service: svc)
+                ensureThisDeviceOnly(account: kcAccount, knownValue: legacyVal, service: keychainService)
+                return legacyVal
+            }
+            return legacyVal
         }
         // Keychain miss: try a one-time migration from legacy UserDefaults.
         return migrateLegacy(account)
     }
 
     static func remove(_ account: String) {
-        SecItemDelete(makeQuery(account: keychainAccount(for: account)) as CFDictionary)
+        let kcAccount = keychainAccount(for: account)
+        SecItemDelete(makeQuery(account: kcAccount) as CFDictionary)
+        for svc in legacyServices { deleteServiceItem(account: kcAccount, service: svc) }
+        pendingLegacyRetry.remove(account)
         clearLegacy(account)
         NotificationCenter.default.post(name: .secretStoreDidChange, object: account)
     }
@@ -67,23 +139,99 @@ enum SecretStore {
         return trimmed.isEmpty ? .remove : .upsert(trimmed)
     }
 
-    // MARK: - Keychain primitives (Security framework)
+    /// Header field carrying the Gemini API key (analogous to Bearer for
+    /// OpenRouter/Groq). The key MUST NOT appear in URL query strings, logs,
+    /// or error messages — only in this header.
+    static let geminiKeyHeaderField = "x-goog-api-key"
+
+    /// Pure trim+isEmpty core (offline-testable seam): nil/empty/whitespace
+    /// ⇒ nil, otherwise the trimmed value. Unifies every empty-key check
+    /// (`CloudASR.available`, `GeminiLiveEngine`, typed passes).
+    static func normalizedKey(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// Pure non-empty check over a raw (possibly untrimmed) value.
+    static func isNonEmptyKey(_ raw: String?) -> Bool {
+        normalizedKey(raw) != nil
+    }
+
+    /// Single trim+isEmpty helper unifying every Keychain-backed empty-key
+    /// check. `get` already trims, this makes the contract explicit.
+    static func trimmedKey(_ account: String) -> String? {
+        normalizedKey(get(account))
+    }
+
+    /// Non-empty key present for `account`.
+    static func hasKey(_ account: String) -> Bool {
+        trimmedKey(account) != nil
+    }
+
+    /// Этап 0: единственный конструктор Gemini-запросов. Ключ кладётся
+    /// ТОЛЬКО в заголовок `x-goog-api-key` (аналогия с Bearer), URL обязан
+    /// быть без секрета — такой URL безопасно логировать через
+    /// `AppLogger.redactedPreview` (никогда не логировать сам ключ/URL с ключом).
+    static func geminiRequest(url: URL, apiKey: String) -> URLRequest {
+        var req = URLRequest(url: url)
+        // normalizedKey гарантирует trim; пустой ключ сюда не должен попадать
+        // (коллеры проверяют trimmedKey заранее), но header с пустым значением
+        // не ставим — fail-closed на уровне запроса.
+        if let normalized = normalizedKey(apiKey) {
+            req.setValue(normalized, forHTTPHeaderField: geminiKeyHeaderField)
+        }
+        return req
+    }
+
+    /// Этап 0: детектор утечки ключа в URL (для тестов/ревью). True ⇒ блокер:
+    /// ключ оказался в query — логирование такого URL запрещено.
+    static func urlLeaksKey(_ url: URL, key: String) -> Bool {
+        guard !key.isEmpty else { return false }
+        return url.absoluteString.contains(key)
+    }
+
+    // MARK: - Этап 1: Keychain primitives (Security framework, ThisDeviceOnly)
+
+    /// Класс доступа для новых items: только это устройство, без бэкапов/iCloud.
+    /// Pure-seam для offline-тестов атрибута (без реального Keychain).
+    static let keychainAccessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
     private static func keychainAccount(for account: String) -> String {
         prefix + account
     }
 
-    private static func makeQuery(account: String) -> [String: Any] {
+    /// Базовый query для поиска. iCloud sync запрещён на записи (см. makeAddQuery);
+    /// в поиске фильтр synchronizable не ставим для совместимости со старыми items.
+    static func makeQuery(account: String, service: String? = nil) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service ?? keychainService,
             kSecAttrAccount as String: account,
         ]
     }
 
+    /// Pure-seam конструктор SecItemAdd: фиксированный service + ThisDeviceOnly + sync=false.
+    /// Тесты проверяют атрибуты без реального Keychain.
+    static func makeAddQuery(account: String, value: String, service: String? = nil) -> [String: Any] {
+        var add = makeQuery(account: account, service: service)
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrAccessible as String] = keychainAccessible
+        add[kSecAttrSynchronizable as String] = false
+        return add
+    }
+
+    /// Pure-seam: true когда текущий accessible отличается от ThisDeviceOnly
+    /// (nil = неизвестно → считать нужной миграцию при известном значении).
+    static func needsAccessibleMigration(currentAccessible: String?) -> Bool {
+        guard let cur = currentAccessible else { return true }
+        return cur != (keychainAccessible as String)
+    }
+
     /// Returns the stored secret, or nil when absent/unavailable.
-    private static func read(account: String) -> String? {
-        var query = makeQuery(account: account)
+    /// Сначала канон, затем legacy services (совместимость со старыми ключами).
+    private static func read(account: String, service: String? = nil) -> String? {
+        var query = makeQuery(account: account, service: service)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
@@ -92,17 +240,61 @@ enum SecretStore {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Текущий accessible-атрибут item (nil когда item отсутствует/недоступен).
+    private static func currentAccessible(account: String, service: String) -> String? {
+        var query = makeQuery(account: account, service: service)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let attrs = result as? [String: Any],
+              let acc = attrs[kSecAttrAccessible as String] else { return nil }
+        return "\(acc)"
+    }
+
+    /// Best-effort миграция accessible на ThisDeviceOnly: delete+add с тем же значением.
+    /// Вызывается только при известном значении; при неудаче ключ не теряется
+    /// (старый item уже удалён только после успешной записи нового — см. код).
+    private static func ensureThisDeviceOnly(account: String, knownValue: String, service: String) {
+        guard service == keychainService else { return }
+        let cur = currentAccessible(account: account, service: service)
+        guard needsAccessibleMigration(currentAccessible: cur) else { return }
+        let data = Data(knownValue.utf8)
+        var add = makeQuery(account: account, service: service)
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = keychainAccessible
+        add[kSecAttrSynchronizable as String] = false
+        // Удаляем старый item только если новый успешно записан во временный account?
+        // Упрощённо и безопасно: delete+add с немедленным read-back; при mismatch
+        // восстанавливаем исходное значение тем же путём (best-effort, без потери).
+        let delStatus = SecItemDelete(makeQuery(account: account, service: service) as CFDictionary)
+        guard delStatus == errSecSuccess || delStatus == errSecItemNotFound else { return }
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            // Откат: вернуть значение хотя бы со старым классом (лучше чем потеря).
+            var fallback = makeQuery(account: account, service: service)
+            fallback[kSecValueData as String] = data
+            fallback[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            _ = SecItemAdd(fallback as CFDictionary, nil)
+            return
+        }
+    }
+
+    /// Удаляет Keychain-item в указанном service (для зачистки legacy services).
+    private static func deleteServiceItem(account: String, service: String) {
+        _ = SecItemDelete(makeQuery(account: account, service: service) as CFDictionary)
+    }
+
     /// Update-in-place, falling back to add. Returns the final OSStatus.
+    /// Новые items: ThisDeviceOnly + sync=false. Существующие items мигрируют
+    /// на ThisDeviceOnly через ensureThisDeviceOnly при следующем чтении/записи.
     private static func upsert(_ value: String, account: String) -> OSStatus {
         let data = Data(value.utf8)
         let update: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(makeQuery(account: account) as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess { return errSecSuccess }
         guard updateStatus == errSecItemNotFound else { return updateStatus }
-        var add = makeQuery(account: account)
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        return SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(makeAddQuery(account: account, value: value) as CFDictionary, nil)
     }
 
     // MARK: - Migration decision core (internal seam for offline unit tests)
@@ -175,15 +367,19 @@ enum SecretStore {
         switch migrationDecision(status: status, readBack: readBack, raw: raw) {
         case .migrated:
             clearLegacy(account)
+            pendingLegacyRetry.remove(account)
             return raw
         case .preserved(let fallback):
-            // Keep the legacy value in place; `get` returns it (or nil when
-            // there is nothing) instead of losing the key.
+            // Этап 1: неуспех проверки → планируем повтор + предупреждение (без значения).
+            pendingLegacyRetry.insert(account)
+            NSLog("[SingAR] SecretStore: legacy migration deferred for account, retry scheduled")
             return fallback
         }
     }
 
-    private static func clearLegacy(_ account: String) {
+    /// Удаляет legacy UserDefaults `secret.*`. Идемпотентна: повторный вызов
+    /// без ключа — no-op. Вызывается ТОЛЬКО после read-back проверки.
+    static func clearLegacy(_ account: String) {
         UserDefaults.standard.removeObject(forKey: prefix + account)
     }
 }

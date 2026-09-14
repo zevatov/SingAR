@@ -72,9 +72,6 @@ final class AppSettings: ObservableObject {
 
     private let defaults = UserDefaults.standard
 
-    /// Fired on any change so external controllers can refresh.
-    var onChange: (() -> Void)?
-
     private enum Key {
         static let enabled         = "enabled"
         static let mode            = "mode"
@@ -93,43 +90,43 @@ final class AppSettings: ObservableObject {
     // MARK: Bool toggles
 
     @Published var enabled: Bool {
-        didSet { defaults.set(enabled, forKey: Key.enabled); fire() }
+        didSet { defaults.set(enabled, forKey: Key.enabled) }
     }
     @Published var autoPunctuation: Bool {
-        didSet { defaults.set(autoPunctuation, forKey: Key.autoPunctuation); fire() }
+        didSet { defaults.set(autoPunctuation, forKey: Key.autoPunctuation) }
     }
     @Published var voiceCommands: Bool {
-        didSet { defaults.set(voiceCommands, forKey: Key.voiceCommands); fire() }
+        didSet { defaults.set(voiceCommands, forKey: Key.voiceCommands) }
     }
     @Published var livePartials: Bool {
-        didSet { defaults.set(livePartials, forKey: Key.livePartials); fire() }
+        didSet { defaults.set(livePartials, forKey: Key.livePartials) }
     }
     @Published var pauseMedia: Bool {
-        didSet { defaults.set(pauseMedia, forKey: Key.pauseMedia); fire() }
+        didSet { defaults.set(pauseMedia, forKey: Key.pauseMedia) }
     }
     @Published var launchAtLogin: Bool {
-        didSet { defaults.set(launchAtLogin, forKey: Key.launchAtLogin); fire() }
+        didSet { defaults.set(launchAtLogin, forKey: Key.launchAtLogin) }
     }
     @Published var stopOnFocusLoss: Bool {
-        didSet { defaults.set(stopOnFocusLoss, forKey: Key.stopOnFocusLoss); fire() }
+        didSet { defaults.set(stopOnFocusLoss, forKey: Key.stopOnFocusLoss) }
     }
     @Published var cloudCleanup: Bool {
-        didSet { defaults.set(cloudCleanup, forKey: Key.cloudCleanup); fire() }
+        didSet { defaults.set(cloudCleanup, forKey: Key.cloudCleanup) }
     }
 
     // MARK: Enum options
 
     @Published var mode: DictationMode {
-        didSet { defaults.set(mode.rawValue, forKey: Key.mode); fire() }
+        didSet { defaults.set(mode.rawValue, forKey: Key.mode) }
     }
     @Published var hotkey: HotkeyChoice {
-        didSet { defaults.set(hotkey.rawValue, forKey: Key.hotkey); fire() }
+        didSet { defaults.set(hotkey.rawValue, forKey: Key.hotkey) }
     }
     @Published var cloudModel: CloudModel {
-        didSet { defaults.set(cloudModel.rawValue, forKey: Key.cloudModel); fire() }
+        didSet { defaults.set(cloudModel.rawValue, forKey: Key.cloudModel) }
     }
     @Published var language: ASRLanguage {
-        didSet { defaults.set(language.rawValue, forKey: Key.language); fire() }
+        didSet { defaults.set(language.rawValue, forKey: Key.language) }
     }
 
     private init() {
@@ -163,7 +160,4 @@ final class AppSettings: ObservableObject {
         self.language = ASRLanguage(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .auto
     }
 
-    private func fire() {
-        onChange?()
-    }
 }

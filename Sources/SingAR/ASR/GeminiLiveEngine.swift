@@ -22,11 +22,50 @@ final class GeminiLiveEngine: ASREngine {
     // audio-tap thread — blocking/skip-live there degrades live dictation; the
     // oldest pre-connect audio is least valuable (speech start), so dropping it
     // minimizes transcript loss. No WebSocket message format is affected.
-    private static let maxPendingChunks = 200
+    // Этап 2: продуктовое решение зафиксировано — DROP-OLDEST + счётчик
+    // `pendingDroppedCount` + flush-burst не более `flushBurstCap` (== cap).
+    static let maxPendingChunks = 200
+    /// Этап 2: burst сброса после `setupComplete` ограничен тем же cap —
+    /// 200 WebSocket-send подряд максимум, без unbounded-цикла.
+    static let flushBurstCap = 200
+    /// Этап 2: reconnect-политика после классифицированной ошибки.
+    static let maxReconnectAttempts = 2
+    /// Этап 2: pure-seam бэкоффа (ms) для тестов без сети/таймеров.
+    static func reconnectBackoffMs(attempt: Int) -> UInt64 {
+        switch attempt {
+        case 0: return 500
+        case 1: return 1_000
+        default: return 2_000
+        }
+    }
+    /// Этап 2: pure-seam решения о переподключении (offline-тестируемо).
+    /// Переподключаемся только на транспортабельных ошибках и пока есть попытки.
+    static func shouldReconnect(error: CloudASRError, attempt: Int) -> Bool {
+        guard attempt < maxReconnectAttempts else { return false }
+        switch error {
+        case .network, .timeout, .serverError: return true
+        default: return false
+        }
+    }
+    /// Этап 2: drain-таймаут финализации (ms). Без соединения — 0 (ранний выход,
+    /// никакого «всегда +850мс»); с соединением — 850мс максимум с ранним
+    /// выходом по `turnComplete`/тексту/отмене.
+    static func finalizeDrainMs(connected: Bool) -> UInt64 {
+        connected ? 850 : 0
+    }
     private var pendingAudioQueue: [Data] = []
     private var pendingDroppedCount = 0
     private var setupCompleteReceived = false
     private var completionContinuation: CheckedContinuation<String, Never>?
+    /// Этап 2: флаг конца хода для раннего выхода из drain (убирает «всегда +850мс»).
+    /// Ставится в `handleMessage` при `turnComplete=true`, сбрасывается на новой сессии.
+    private var turnCompleted = false
+    /// Этап 2: инвалидация сессии после демонтажа (37,346). Инкремент на каждой
+    /// новой сессии (`feed` first) и на `cancel`/`finalize`/`teardown`; поздние
+    /// `handleMessage` с чужим id игнорируются. `urlSession` переиспользуется
+    /// между сессиями (не инвалидируется) — сокет пересоздаётся на `feed`.
+    private var sessionId = 0
+    private var reconnectAttempt = 0
 
     // Gate 2.4: last typed failure on the live path (setup/WS/HTTP status).
     // `finalize()` still returns `String` per the ASREngine protocol, so the
@@ -73,7 +112,12 @@ final class GeminiLiveEngine: ASREngine {
                 isConnected = false
                 setupCompleteReceived = false
                 pendingAudioQueue.removeAll()
+                pendingDroppedCount = 0
                 lastError = nil
+                reconnectAttempt = 0
+                turnCompleted = false
+                completionContinuation = nil
+                sessionId &+= 1
             }
             return first
         }
@@ -99,22 +143,32 @@ final class GeminiLiveEngine: ASREngine {
         }
     }
 
+    /// Этап 2: offline-seam политики pre-connect очереди (без сети/аудио).
+    /// Возвращает (kept, dropped) для потока входящих чанков при cap.
+    static func preConnectPlan(incoming: Int, alreadyQueued: Int, cap: Int = maxPendingChunks) -> (kept: Int, dropped: Int) {
+        let total = alreadyQueued + incoming
+        guard total > cap else { return (incoming, 0) }
+        let dropped = total - cap
+        return (incoming - dropped, dropped)
+    }
+
     // MARK: WebSocket Connection
 
     private func startLiveConnection() {
-        guard let apiKey = SecretStore.get(SecretStore.Account.googleApiKey), !apiKey.isEmpty else {
+        guard let apiKey = SecretStore.trimmedKey(SecretStore.Account.googleApiKey) else {
             NSLog("[SingAR] ⚠️ Google API key is missing for Gemini Live streaming")
             recordError(.missingKey)
             return
         }
 
-        let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=\(apiKey)"
-        guard let url = URL(string: urlString) else {
+        // Этап 0: ключ только в заголовке x-goog-api-key, никогда в query URL
+        // (аналогия с Bearer для OpenRouter/Groq). URL без секрета безопасно логировать.
+        guard let url = URL(string: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent") else {
             recordError(.emptySpeech)
             return
         }
 
-        var request = URLRequest(url: url)
+        var request = SecretStore.geminiRequest(url: url, apiKey: apiKey)
         request.timeoutInterval = 30
 
         let task = urlSession.webSocketTask(with: request)
@@ -159,7 +213,8 @@ final class GeminiLiveEngine: ASREngine {
         let message = URLSessionWebSocketTask.Message.string(jsonString)
         webSocketTask?.send(message) { [weak self] error in
             if let error {
-                NSLog("[SingAR] Gemini Live setup send error: \(error)")
+                // Этап 1: санитизация — только домен+код, без URL/тел (AppLogger.log ещё раз санитизирует).
+                AppLogger.shared.log("Gemini Live setup send error: \(AppLogger.sanitizedError(error))")
                 self?.recordError(CloudASRError.from(error))
             }
         }
@@ -183,7 +238,8 @@ final class GeminiLiveEngine: ASREngine {
         let message = URLSessionWebSocketTask.Message.string(jsonString)
         webSocketTask?.send(message) { error in
             if let error {
-                NSLog("[SingAR] Audio chunk send error: \(error)")
+                // Этап 1: санитизация — только домен+код, без URL/тел.
+                AppLogger.shared.log("Audio chunk send error: \(AppLogger.sanitizedError(error))")
             }
         }
     }
@@ -201,28 +257,75 @@ final class GeminiLiveEngine: ASREngine {
         let message = URLSessionWebSocketTask.Message.string(jsonString)
         webSocketTask?.send(message) { [weak self] error in
             if let error {
-                NSLog("[SingAR] turnComplete send error: \(error)")
+                // Этап 1: санитизация — только домен+код, без URL/тел.
+                AppLogger.shared.log("turnComplete send error: \(AppLogger.sanitizedError(error))")
                 self?.recordError(CloudASRError.from(error))
             }
         }
     }
 
-    private func listenForResponses() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self, self.isAlive else { return }
+    /// Этап 1: pure-seam санитизации WS-ошибок — только домен+код, без URL/тел.
+    /// Используется перед AppLogger.shared.log; покрыт offline-тестом.
+    static func sanitizedReceiveError(_ error: Error) -> String {
+        AppLogger.sanitizedError(error)
+    }
 
+    private func listenForResponses() {
+        // Этап 2: sessionId захватывается — поздние ответы демонтированной
+        // сессии игнорируются (инвалидация после демонтажа).
+        let sid = withLock { sessionId }
+        webSocketTask?.receive { [weak self] result in
+            guard let self else { return }
+            let alive: Bool = self.withLock { self.isAlive && self.sessionId == sid }
+            guard alive else { return }
             switch result {
             case .success(let message):
-                self.handleMessage(message)
-                self.listenForResponses() // Continue listening loop
+                self.handleMessage(message, sessionId: sid)
+                self.listenForResponses()
             case .failure(let error):
-                NSLog("[SingAR] Gemini Live WebSocket receive error: \(error)")
-                self.recordError(CloudASRError.from(error))
+                let typed = CloudASRError.from(error)
+                AppLogger.shared.log("Gemini Live WebSocket receive error: \(Self.sanitizedReceiveError(error))")
+                self.recordError(typed)
+                if Self.shouldReconnect(error: typed, attempt: self.withLock({ self.reconnectAttempt })) {
+                    self.scheduleReconnect(sessionId: sid)
+                } else {
+                    self.listenForResponses()
+                }
             }
         }
     }
 
-    private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
+    private func scheduleReconnect(sessionId sid: Int) {
+        let attempt: Int = withLock {
+            guard self.sessionId == sid, self.isAlive else { return -1 }
+            let a = self.reconnectAttempt
+            self.reconnectAttempt += 1
+            return a
+        }
+        guard attempt >= 0 else { return }
+        let backoffMs = Self.reconnectBackoffMs(attempt: attempt)
+        AppLogger.shared.log("Gemini Live reconnect attempt=\(attempt + 1) backoff=\(backoffMs)ms")
+        let old: URLSessionWebSocketTask? = withLock {
+            let t = self.webSocketTask
+            self.webSocketTask = nil
+            self.isConnected = false
+            self.setupCompleteReceived = false
+            return t
+        }
+        old?.cancel(with: .normalClosure, reason: nil)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .milliseconds(Int(backoffMs))) { [weak self] in
+            guard let self else { return }
+            let ok: Bool = self.withLock { self.isAlive && self.sessionId == sid }
+            guard ok else { return }
+            self.startLiveConnection()
+        }
+    }
+
+    private func handleMessage(_ message: URLSessionWebSocketTask.Message, sessionId sid: Int? = nil) {
+        if let sid {
+            let current: Bool = withLock { self.sessionId == sid && self.isAlive }
+            guard current else { return }
+        }
         let data: Data?
         switch message {
         case .string(let text):
@@ -238,13 +341,18 @@ final class GeminiLiveEngine: ASREngine {
 
         // Check for setupComplete
         if json["setupComplete"] != nil {
-            withLock {
+            let toFlush: [Data] = withLock {
                 self.isConnected = true
                 self.setupCompleteReceived = true
-                for chunk in self.pendingAudioQueue {
-                    self.sendAudioChunk(chunk)
+                let burst = Array(self.pendingAudioQueue.prefix(Self.flushBurstCap))
+                self.pendingAudioQueue.removeFirst(min(burst.count, self.pendingAudioQueue.count))
+                if !self.pendingAudioQueue.isEmpty {
+                    NSLog("[SingAR] Gemini Live flush burst capped at \(Self.flushBurstCap); \(self.pendingAudioQueue.count) chunks remain queued")
                 }
-                self.pendingAudioQueue.removeAll()
+                return burst
+            }
+            for chunk in toFlush {
+                self.sendAudioChunk(chunk)
             }
             return
         }
@@ -287,6 +395,7 @@ final class GeminiLiveEngine: ASREngine {
 
             if let turnComplete = serverContent["turnComplete"] as? Bool, turnComplete {
                 withLock {
+                    self.turnCompleted = true
                     if let cont = self.completionContinuation {
                         self.completionContinuation = nil
                         // Gate 2.3: same lexicon normalization as every other engine.
@@ -299,25 +408,34 @@ final class GeminiLiveEngine: ASREngine {
     }
 
     func finalize() async -> String {
-        // Send turnComplete to Google to finalize recognition
-        sendTurnComplete()
-
-        // Graceful audio drain: wait up to 850ms for in-flight audio frames and trailing words
-        let deadline = Date().addingTimeInterval(0.85)
-        while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            // Task cancellation (Esc) must unfreeze this wait immediately;
-            // the cancelled finalize Task never needs the trailing words.
-            let hasCont = withLock { self.completionContinuation == nil }
-            if !hasCont || Task.isCancelled { break }
+        // Этап 2: ранний выход без соединения — никакого «всегда +850мс».
+        // Drain только при живом сокете, с ранним выходом по концу хода /
+        // тексту / отмене (см. `finalizeDrainMs` + `turnCompleted`).
+        let connected: Bool = withLock { isConnected && setupCompleteReceived && webSocketTask != nil }
+        if connected {
+            sendTurnComplete()
+            let drainMs = Self.finalizeDrainMs(connected: true)
+            let deadline = Date().addingTimeInterval(Double(drainMs) / 1000.0)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                let done: Bool = withLock { turnCompleted || Task.isCancelled || !accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                if done { break }
+                if Task.isCancelled { break }
+            }
+        } else {
+            AppLogger.shared.log("Gemini Live finalize: no live connection — early exit, no 850ms drain")
         }
 
-        withLock { isAlive = false }
+        withLock {
+            isAlive = false
+            sessionId &+= 1
+        }
 
         let text = withLock {
             let result = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             accumulatedText = ""
             onPartial = nil
+            turnCompleted = false
             return result
         }
 
@@ -330,10 +448,12 @@ final class GeminiLiveEngine: ASREngine {
     func cancel() {
         withLock {
             isAlive = false
+            sessionId &+= 1
             accumulatedText = ""
             onPartial = nil
             pendingAudioQueue.removeAll()
             pendingDroppedCount = 0
+            turnCompleted = false
             // Gate 2.4: explicit session abort is a typed cancellation, unless
             // a real failure (invalid key, network, ...) already happened.
             if lastError == nil { lastError = .cancelled }
@@ -346,11 +466,15 @@ final class GeminiLiveEngine: ASREngine {
     private func teardown() {
         // Mutate connection state under the lock (feed/handleMessage read it
         // from audio/session threads); cancel the socket outside the lock.
+        // Этап 2: инвалидация сессии после демонтажа — `sessionId` бампается,
+        // поздние `handleMessage`/`listenForResponses` с чужим id дропаются.
+        // `urlSession` переиспользуется (не инвалидируется), сокет пересоздаётся на `feed`.
         let socket: URLSessionWebSocketTask? = withLock {
             let t = webSocketTask
             webSocketTask = nil
             isConnected = false
             setupCompleteReceived = false
+            sessionId &+= 1
             return t
         }
         socket?.cancel(with: .normalClosure, reason: nil)

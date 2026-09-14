@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CryptoKit
 
 /// Manages on-demand downloading and storage of the local Whisper model
 /// (~1.5 GB ggml-large-v3-turbo.bin). Keeps the app bundle tiny (~1.6 MB).
@@ -9,6 +10,13 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
     static let modelFileName = "ggml-large-v3-turbo.bin"
     static let downloadURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin")!
+
+    /// Этап 1: ожидаемый SHA256 модели ggml-large-v3-turbo.bin (hex, 64 символа).
+    /// nil = официальный хэш ещё не зафиксирован (см. docs/ref-audit-handoffs.md §4.5):
+    /// download-time проверка пропускается, поведение как в Этапе 0.
+    /// Когда хэш будет зафиксирован — положить hex сюда, verify станет fail-closed.
+    /// Pure-seam тесты используют verifySHA256(data:expected:) напрямую, без сети.
+    static let expectedSHA256: String? = nil
 
     enum ModelStatus: Equatable {
         case notDownloaded
@@ -183,7 +191,69 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
         self.status = .downloading(progress: progress)
     }
 
+    // MARK: - Этап 1: SHA256 integrity (offline-testable pure seam)
+
+    /// Потоковый SHA256 файла без загрузки целиком в память (модель ~1.6 ГБ).
+    /// Возвращает hex (64 символа). Бросает при ошибке чтения.
+    static func sha256HexOfFile(at url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1_048_576)
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Pure offline-seam: hex-сравнение без I/O (для unit-тестов без сети).
+    /// Сравнение case-insensitive, пробелы/переносы по краям игнорируются.
+    static func verifySHA256Hex(_ actualHex: String, expected: String) -> Bool {
+        actualHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            == expected.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Pure offline-seam: SHA256 байтов в памяти (малые фикстуры тестов).
+    static func verifySHA256(data: Data, expected: String) -> Bool {
+        let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return verifySHA256Hex(actual, expected: expected)
+    }
+
+    /// Fail-closed проверка скачанного файла ДО moveItem.
+    /// - nil/пустой expected = хэш официально не зафиксирован → пропуск (совместимость с Этапом 0).
+    /// - mismatch → temp удаляется вызывающей стороной, возвращается false.
+    static func isDownloadedFileValid(at location: URL) -> Bool {
+        guard let expected = expectedSHA256?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !expected.isEmpty else { return true }
+        guard let actual = try? sha256HexOfFile(at: location) else { return false }
+        return verifySHA256Hex(actual, expected: expected)
+    }
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // Этап 1: SHA256 до moveItem. Несовпадение → удалить temp, status=.error, без move.
+        // Лог только len+short-hash (без URL/полного хэша/тел), диктовка не затрагивается.
+        if let expected = Self.expectedSHA256?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !expected.isEmpty {
+            do {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: location.path)
+                let byteCount = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+                let actual = try Self.sha256HexOfFile(at: location)
+                guard Self.verifySHA256Hex(actual, expected: expected) else {
+                    try? FileManager.default.removeItem(at: location)
+                    AppLogger.shared.log("❌ Model SHA256 mismatch len=\(byteCount) hash=\(String(actual.prefix(8)))")
+                    self.status = .error("Ошибка целостности модели (SHA256)")
+                    return
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: location)
+                AppLogger.shared.log("❌ Model SHA256 verify failed (unreadable temp)")
+                self.status = .error("Ошибка проверки модели (SHA256)")
+                return
+            }
+        }
         do {
             try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: modelPath.path) {

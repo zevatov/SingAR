@@ -6,10 +6,13 @@ import AVFoundation
 final class AudioRecorder {
 
     private let engine = AVAudioEngine()
-    private let targetFormat = AVAudioFormat(
+    /// Этап 2: fail-closed без force-unwrap (было `!` на 16 кГц mono).
+    /// Nil возможен только на битой аудиоподсистеме — старт тогда отказывает
+    /// с логом вместо краша.
+    private let targetFormat: AVAudioFormat? = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 16_000, channels: 1, interleaved: false
-    )!
+    )
 
     private var onBuffer: ((AVAudioPCMBuffer) -> Void)?
 
@@ -21,8 +24,18 @@ final class AudioRecorder {
     private var converter: AVAudioConverter?
     private var isRunning = false
 
+    deinit {
+        // Этап 2: safety — tap не должен пережить рекордер (idempotent).
+        engine.inputNode.removeTap(onBus: 0)
+    }
+
     func start(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
         guard !isRunning else { return }
+        // Этап 2: fail-closed без force-unwrap вместо краша на битой подсистеме.
+        guard let targetFormat else {
+            NSLog("[SingAR] AudioRecorder.start refused: targetFormat nil (audio subsystem)")
+            return
+        }
         // Reset captured audio for the cloud pass: without this, buffers from
         // every previous dictation accumulate across sessions, so the cloud
         // pass would transcribe a concatenation of all past dictations and
@@ -49,7 +62,15 @@ final class AudioRecorder {
             isRunning = true
             NSLog("[SingAR] 🎤 AVAudioEngine started — capturing mic")
         } catch {
+            // Этап 2: ветка ошибки старта снимает tap и чистит колбэк —
+            // иначе tap висит без running-движка и льёт в resample/onBuffer.
             NSLog("[SingAR] AVAudioEngine start failed: \(error)")
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            isRunning = false
+            self.onBuffer = nil
+            onCaptureLimitReached = nil
+            converter = nil
         }
     }
 
@@ -103,7 +124,7 @@ final class AudioRecorder {
 
     private func resample(_ input: AVAudioPCMBuffer) {
         guard let converter else { return }
-        let targetFormat = self.targetFormat
+        guard let targetFormat = self.targetFormat else { return }
 
         let ratio = targetFormat.sampleRate / input.format.sampleRate
         let outFrameCapacity = AVAudioFrameCount(Double(input.frameLength) * ratio)

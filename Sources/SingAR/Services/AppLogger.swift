@@ -24,8 +24,9 @@ final class AppLogger {
     private init() {
         self.logFile = Self.logFileURL
         if !FileManager.default.fileExists(atPath: logFile.path) {
-            FileManager.default.createFile(atPath: logFile.path, contents: nil)
+            FileManager.default.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600])
         }
+        Self.enforceOwnerOnlyPermissions(at: logFile)
         self.fileHandle = try? FileHandle(forWritingTo: logFile)
         self.fileHandle?.seekToEndOfFile()
 
@@ -35,10 +36,54 @@ final class AppLogger {
         log("🚀 SingAR initialized v\(AppVersion.current)")
     }
 
+    /// Этап 1: права только владельца (0600) для лог-файла. Best-effort, без throw.
+    static func enforceOwnerOnlyPermissions(at url: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Этап 1: санитизация перед записью в лог. Убирает URL (http/https/ws/wss),
+    /// остатки query с секретом, заголовок ключа; тела/полный текст сюда не класть —
+    /// для текста только `redactedPreview`. Pure-seam, offline-тестируемо.
+    static func sanitize(_ message: String) -> String {
+        var out = message
+        // URL целиком → плейсхолдер (запрет записи URL).
+        // Паттерн намеренно без секрета: матчит только схему+хост, не значения.
+        let urlPattern = "(https?|wss?)://\\S+"
+        if let urlRegex = try? NSRegularExpression(pattern: urlPattern, options: .caseInsensitive) {
+            out = urlRegex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "<url-redacted>")
+        }
+        // Остатки query с секретом без схемы.
+        let queryKeyPattern = "([?&](key|api_key|apiKey)=)[^\\s&]+"
+        if let keyRegex = try? NSRegularExpression(pattern: queryKeyPattern, options: .caseInsensitive) {
+            out = keyRegex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "$1<redacted>")
+        }
+        // Заголовок с ключом, если кто-то попытался залогировать его значение.
+        if let hdrRegex = try? NSRegularExpression(pattern: "(x-goog-api-key\\s*[:=]\\s*)\\S+", options: .caseInsensitive) {
+            out = hdrRegex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "$1<redacted>")
+        }
+        return out
+    }
+
+    /// Этап 1: безопасное описание ошибки без URL/тел. Только домен+код,
+    /// никогда `localizedDescription` целиком (там бывают URL).
+    static func sanitizedError(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain)(\(ns.code))"
+    }
+
+    /// True когда сообщение безопасно писать в лог (нет URL/схемы).
+    static func isSafeForLog(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return !lower.contains("http://") && !lower.contains("https://")
+            && !lower.contains("ws://") && !lower.contains("wss://")
+    }
+
     func log(_ message: String) {
+        // Этап 1: санитизация обязательна до NSLog и до записи в файл.
+        let safe = Self.sanitize(message)
         let timestamp = dateFormatter.string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        NSLog("[SingAR] %@", message)
+        let line = "[\(timestamp)] \(safe)\n"
+        NSLog("[SingAR] %@", safe)
 
         queue.async { [weak self] in
             guard let self, let data = line.data(using: .utf8) else { return }
@@ -72,7 +117,8 @@ final class AppLogger {
             .appendingPathComponent("singar.log.1")
         try? fm.removeItem(at: archivedURL)
         try? fm.moveItem(at: logFile, to: archivedURL)
-        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        FileManager.default.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        Self.enforceOwnerOnlyPermissions(at: logFile)
         purgeExpiredArchives()
     }
 

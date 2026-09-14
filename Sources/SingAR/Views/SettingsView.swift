@@ -12,6 +12,11 @@ struct SettingsView: View {
     @State private var verifyingAccounts: Set<String> = []
     @State private var keyStatusMap: [String: KeyValidationStatus] = [:]
 
+    /// Этап 3: 500-мс дебаунс авто-верификации (1 запрос на паузу ввода).
+    /// Сеть трогает только после 500 мс тишины; каждая правка отменяет
+    /// предыдущий запрос. Ручная кнопка «Проверить» идёт мимо дебаунса.
+    @State private var verifyDebouncer = KeyVerifyDebouncer()
+
     @State private var isMicGranted = false
     @State private var isAccessibilityGranted = false
     @State private var isSpeechGranted = false
@@ -52,7 +57,7 @@ struct SettingsView: View {
 
                     Spacer()
 
-                    Link(destination: URL(string: "https://github.com/your_github_repo")!) {
+                    Link(destination: URL(string: "https://github.com/zevatov/SingAR")!) {
                         HStack(spacing: 4) {
                             Image(systemName: "curlybraces")
                                 .font(.system(size: 12))
@@ -583,6 +588,13 @@ struct SettingsView: View {
                     .onChange(of: keyBinding.wrappedValue) { _, newValue in
                         SecretStore.set(newValue, for: account)
                         keyStatusMap[account] = .untested
+                        // Этап 3: авто-верификация через дебаунс. Сеть только
+                        // после 500 мс тишины; ручная кнопка — без дебаунса.
+                        if KeyVerifyDebouncer.shouldScheduleNetworkVerify(rawKey: newValue) {
+                            verifyDebouncer.schedule { [account] in
+                                self.verifyKey(for: account)
+                            }
+                        }
                     }
 
                 Button(action: {
@@ -742,22 +754,19 @@ struct SettingsView: View {
         }
     }
 
-    private func verifyGeminiKey() {
-        let account = SecretStore.Account.googleApiKey
-        guard !googleApiKey.isEmpty else { return }
+    // MARK: - Verification Logic (Этап 3: общий проверяемый путь)
+
+    /// Этап 3: единый путь verify для всех трёх аккаунтов — trim через
+    /// `SecretStore.normalizedKey`, таймаут 8 с, typed-статусы.
+    /// Вызывается дебаунсером (onChange) и вручную кнопкой «Проверить».
+    private func runVerify(account: String, makeRequest: @escaping (String) -> URLRequest) {
+        guard let raw = storedRawKey(for: account),
+              let trimmedKey = SecretStore.normalizedKey(raw) else { return }
         verifyingAccounts.insert(account)
         keyStatusMap[account] = .untested
 
         Task {
-            guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(googleApiKey)") else {
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
-                }
-                return
-            }
-
-            var request = URLRequest(url: url)
+            var request = makeRequest(trimmedKey)
             request.timeoutInterval = 8
 
             do {
@@ -784,98 +793,39 @@ struct SettingsView: View {
                     self.keyStatusMap[account] = .invalid(error.localizedDescription)
                 }
             }
+        }
+    }
+
+    private func storedRawKey(for account: String) -> String? {
+        switch account {
+        case SecretStore.Account.googleApiKey: return googleApiKey
+        case SecretStore.Account.groqApiKey:   return groqApiKey
+        case SecretStore.Account.openrouterKey: return openrouterKey
+        default: return nil
+        }
+    }
+
+    private func verifyGeminiKey() {
+        // Этап 0: ключ только в заголовке x-goog-api-key (аналогия с Bearer),
+        // никогда в query URL — URL без секрета безопасно логировать.
+        runVerify(account: SecretStore.Account.googleApiKey) {
+            SecretStore.geminiRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!, apiKey: $0)
         }
     }
 
     private func verifyGroqKey() {
-        let account = SecretStore.Account.groqApiKey
-        guard !groqApiKey.isEmpty else { return }
-        verifyingAccounts.insert(account)
-        keyStatusMap[account] = .untested
-
-        Task {
-            guard let url = URL(string: "https://api.groq.com/openai/v1/models") else {
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
-                }
-                return
-            }
-
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 8
-            request.setValue("Bearer \(groqApiKey)", forHTTPHeaderField: "Authorization")
-
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                let http = response as? HTTPURLResponse
-                let code = http?.statusCode ?? 0
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    if code == 200 {
-                        self.keyStatusMap[account] = .valid
-                    } else {
-                        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                           let err = json["error"] as? [String: Any],
-                           let msg = err["message"] as? String {
-                            self.keyStatusMap[account] = .invalid(msg)
-                        } else {
-                            self.keyStatusMap[account] = .invalid("HTTP \(code)")
-                        }
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    self.keyStatusMap[account] = .invalid(error.localizedDescription)
-                }
-            }
+        runVerify(account: SecretStore.Account.groqApiKey) { key in
+            var req = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/models")!)
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            return req
         }
     }
 
     private func verifyOpenRouterKey() {
-        let account = SecretStore.Account.openrouterKey
-        guard !openrouterKey.isEmpty else { return }
-        verifyingAccounts.insert(account)
-        keyStatusMap[account] = .untested
-
-        Task {
-            guard let url = URL(string: "https://openrouter.ai/api/v1/auth/key") else {
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    self.keyStatusMap[account] = .invalid("Некорректный ключ")
-                }
-                return
-            }
-
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 8
-            request.setValue("Bearer \(openrouterKey)", forHTTPHeaderField: "Authorization")
-
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                let http = response as? HTTPURLResponse
-                let code = http?.statusCode ?? 0
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    if code == 200 {
-                        self.keyStatusMap[account] = .valid
-                    } else {
-                        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                           let err = json["error"] as? [String: Any],
-                           let msg = err["message"] as? String {
-                            self.keyStatusMap[account] = .invalid(msg)
-                        } else {
-                            self.keyStatusMap[account] = .invalid("HTTP \(code)")
-                        }
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.verifyingAccounts.remove(account)
-                    self.keyStatusMap[account] = .invalid(error.localizedDescription)
-                }
-            }
+        runVerify(account: SecretStore.Account.openrouterKey) { key in
+            var req = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/auth/key")!)
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            return req
         }
     }
 }

@@ -9,6 +9,55 @@ import AppKit
 /// Esc cancels an active session. Requires Accessibility permission.
 final class HotkeyManager {
 
+    // MARK: Этап 3: pure seam для сторон модификаторов (offline unit-tested)
+
+    /// Classifies a flagsChanged/keyCode event against the configured trigger.
+    ///
+    /// Ограничение (документировано): определение стороны опирается на
+    /// `NSEvent.keyCode` из global/local monitor. На macOS 26 (Tahoe)
+    /// `CGEventTap` ненадёжен (см. комментарий к классу), поэтому
+    /// CGEvent-flags/sourceStateID путь не используется; NSEvent корректно
+    /// различает стороны через keycode правого (61) и левого (58) Option.
+    /// Если будущая macOS перестанет доставлять корректный keyCode в
+    /// flagsChanged — это место единственная точка правды (`isTriggerEvent`).
+    enum TriggerKey: Equatable {
+        case leftOption
+        case rightOption
+        case fnGlobe
+        case other
+
+        static let leftOptionKeyCode: UInt16 = 58
+        static let rightOptionKeyCode: UInt16 = 61
+        static let fnGlobeKeyCode: UInt16 = 63
+
+        static func classify(keyCode: UInt16) -> TriggerKey {
+            switch keyCode {
+            case leftOptionKeyCode:  return .leftOption
+            case rightOptionKeyCode: return .rightOption
+            case fnGlobeKeyCode:     return .fnGlobe
+            default:                 return .other
+            }
+        }
+
+        static func isLeftOption(keyCode: UInt16) -> Bool {
+            classify(keyCode: keyCode) == .leftOption
+        }
+
+        static func isRightOption(keyCode: UInt16) -> Bool {
+            classify(keyCode: keyCode) == .rightOption
+        }
+
+        /// True только для ТОЧНОГО ключа, выбранного в настройках: в режиме
+        /// Right-Option левый Option (58) НЕ может стартовать/остановить
+        /// диктовку (регресс-требование Этапа 3).
+        static func isTriggerEvent(keyCode: UInt16, hotkey: HotkeyChoice) -> Bool {
+            switch hotkey {
+            case .rightOption: return keyCode == rightOptionKeyCode
+            case .fnOrGlobe:   return keyCode == fnGlobeKeyCode
+            }
+        }
+    }
+
     private let onActivate: () -> Void
     private let onDeactivate: () -> Void
     private let onCancel: () -> Void
@@ -96,7 +145,9 @@ final class HotkeyManager {
         guard event.type == .flagsChanged else {
             return
         }
-        guard keyCode == UInt16(triggerKeyCode) else { return }
+        // Этап 3: side-exact guard через pure seam — левый Option не проходит
+        // в режиме Right-Option (keyCode 58 ≠ 61), Fn/Globe не ловит Option.
+        guard TriggerKey.isTriggerEvent(keyCode: keyCode, hotkey: settings.hotkey) else { return }
 
         // Track the flag state per trigger kind.
         let flagSet: Bool

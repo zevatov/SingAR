@@ -64,18 +64,25 @@ enum WAVWriter {
     }
 
     /// Converts Float32 PCM buffer into raw 16-bit Linear PCM Data (for Gemini Live WebSocket).
+    /// Этап 2: fail-closed без force-unwrap — nil + лог вместо краша.
     static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data? {
         guard let src = buffer.floatChannelData?[0] else { return nil }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return nil }
 
         var data = Data(count: frames * 2)
+        var conversionOK = false
         data.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) in
-            let dst = rawPtr.bindMemory(to: Int16.self).baseAddress!
+            guard let dst = rawPtr.bindMemory(to: Int16.self).baseAddress else { return }
             for i in 0..<frames {
                 let clamped = max(-1.0, min(1.0, src[i]))
                 dst[i] = Int16(clamped * Float(Int16.max))
             }
+            conversionOK = true
+        }
+        guard conversionOK else {
+            NSLog("[SingAR] WAVWriter.pcm16Data: destination baseAddress nil (frames=%d)", frames)
+            return nil
         }
         return data
     }
@@ -83,13 +90,17 @@ enum WAVWriter {
     private static func convertToInt16(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         guard let src = buffer.floatChannelData?[0] else { return nil }
         let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return nil }
         guard let outFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: buffer.format.sampleRate, channels: 1, interleaved: false
         ) else { return nil }
         guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(frames)) else { return nil }
         out.frameLength = AVAudioFrameCount(frames)
-        let dst = out.int16ChannelData![0]
+        guard let dst = out.int16ChannelData?[0] else {
+            NSLog("[SingAR] WAVWriter.convertToInt16: int16ChannelData nil")
+            return nil
+        }
         for i in 0..<frames {
             let clamped = max(-1.0, min(1.0, src[i]))
             dst[i] = Int16(clamped * Float(Int16.max))

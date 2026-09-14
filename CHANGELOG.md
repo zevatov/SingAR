@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Плавная анимация Apple Fluid Droplet без сжатия окна**: устранено деструктивное сжатие окна AppKit до 40x12, ломавшее Auto Layout и скрывавшее содержимое капсулы. Вытекание из строки меню теперь реализовано через нативную трансформацию слоя `CALayer` (`translation` + `scale` $\to$ `identity` с пружинной кривой `(0.16, 1.0, 0.30, 1.0)`).
 - **Надежная Smart Media Pause через CoreAudio + MediaRemote**: устранена проблема, из-за которой Яндекс.Музыка и фоновое видео в браузерах не ставились на паузу. Добавлена прямая детекция активных аудио-потоков через CoreAudio (`kAudioProcessPropertyIsRunningOutput`), снята блокирующая повторная проверка в `pauseBackgroundMedia()`. Теперь Яндекс.Музыка, YouTube, Firefox, Chrome, Safari и сторонние плееры мгновенно встают на паузу при старте речи и возобновляются после завершения диктовки. Полная безопасность от случайного запуска Apple Music сохранена.
 
+### Security & Architecture (Ref-аудит, Этапы 0–3)
+- **Ключи только в заголовках**: API-ключ передаётся исключительно в заголовке `x-goog-api-key` (аналог Bearer) — никогда в query-параметрах URL ([SecretStore.swift](Sources/SingAR/Settings/SecretStore.swift:145)).
+- **Fail-closed AX-gate**: вставка/дозапись live-текста только в верифицированную owned-цель; при сомнении — отказ, а не запись «куда попало» ([DictationFocusTarget.swift](Sources/SingAR/Dictation/DictationFocusTarget.swift)).
+- **Приватность-логи (SHA-seam)**: вместо текста диктовки — длина + SHA-256-хэш ([AppLogger.swift](Sources/SingAR/Services/AppLogger.swift)).
+- **Keychain ThisDeviceOnly**: `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` + синхронизация выключена; миграция legacy-значений с read-back ([SecretStore.swift](Sources/SingAR/Settings/SecretStore.swift:198)).
+- **MainActor-изоляция**: UI-состояние контроллера и VAD-события изолированы на главном акторе, аудио-пути не блокируют UI.
+- **Декомпозиция DictationController**: session lifecycle / live-typing / finalize вынесены в расширения-pipeline ([DictationController+Seams.swift](Sources/SingAR/Dictation/DictationController+Seams.swift)).
+- **Дебаунс проверки ключа**: `KeyVerifyDebouncer` устраняет шторм сетевых проверок при вводе ([KeyVerifyDebouncer.swift](Sources/SingAR/Settings/KeyVerifyDebouncer.swift)).
+- **Стороны Option**: корректное различение Right-Option (keyCode 58/61) и Fn/Globe (63) ([HotkeyManager.swift](Sources/SingAR/Hotkey/HotkeyManager.swift:46)).
+- **Минимальные entitlements**: только audio-input, speech-recognition, network.client ([SingAR.entitlements](Resources/SingAR.entitlements)).
+- **CI-доказательность**: секрет-скан с негативным канареечным тестом и `build_dmg.sh --dry-run` в [ci.yml](.github/workflows/ci.yml).
+
 ## [2.2.3] - 2026-09-12
 
 ### Added
