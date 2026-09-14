@@ -9,7 +9,7 @@
 [![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-0078D7?style=flat)](https://developer.apple.com/metal/)
 [![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.4-brightgreen.svg)](https://github.com/zevatov/SingAR/releases)
+[![Version](https://img.shields.io/badge/version-2.2.5-brightgreen.svg)](https://github.com/zevatov/SingAR/releases)
 
 </div>
 
@@ -88,15 +88,15 @@
 
 ## 🚀 Установка
 
-1. Скачайте образ **`SingAR 2.2.4.dmg`** и файл контрольной суммы **`SingAR 2.2.4.dmg.sha256`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
-2. Откройте DMG и перетащите `SingAR 2.2.4.app` в папку `Applications`.
+1. Скачайте образ **`SingAR 2.2.5.dmg`** и файл контрольной суммы **`SingAR 2.2.5.dmg.sha256`** из раздела [Releases](https://github.com/zevatov/SingAR/releases).
+2. Откройте DMG и перетащите `SingAR 2.2.5.app` в папку `Applications`.
 3. Запустите приложение.
    > **Ad-hoc подпись — осознанный GitHub-путь (без Developer ID и нотаризации по условию владельца):**
    > Это типично для GitHub-проектов с открытым исходным кодом. Исходники и релизы: https://github.com/zevatov/SingAR.
    > macOS Gatekeeper при первом запуске покажет предупреждение, т.к. нотаризации нет — это ожидаемо.
    > - **Вариант 1 (рекомендуется):** по иконке приложения **правой кнопкой мыши (Control-клик) → Открыть**, затем **Открыть** в диалоге Gatekeeper.
-   > - **Вариант 2 (терминал):** снимите карантин `xattr -d com.apple.quarantine "/Applications/SingAR 2.2.4.app"` (точечно) или `xattr -cr "/Applications/SingAR 2.2.4.app"` (полная очистка).
-   > - **Проверка целостности:** `shasum -a 256 -c "SingAR 2.2.4.dmg.sha256"` в папке со скачанным DMG.
+   > - **Вариант 2 (терминал):** снимите карантин `xattr -d com.apple.quarantine "/Applications/SingAR 2.2.5.app"` (точечно) или `xattr -cr "/Applications/SingAR 2.2.5.app"` (полная очистка).
+   > - **Проверка целостности:** `shasum -a 256 -c "SingAR 2.2.5.dmg.sha256"` в папке со скачанным DMG.
    > - **Связка ключей (Keychain):** При запросе доступа к `com.singar.app` введите пароль от вашего Mac и нажмите **«Разрешать всегда»** — это системный механизм macOS для безопасного сохранения ваших API-ключей.
 4. Выдайте разрешения в **Системные настройки → Конфиденциальность и безопасность**:
    - **Микрофон** (для записи голоса)
@@ -123,7 +123,7 @@ swift build
 ./scripts/build_dmg.sh
 ```
 
-Готовый образ диска появится в корне проекта: `SingAR 2.2.4.dmg` + `SingAR 2.2.4.dmg.sha256`.
+Готовый образ диска появится в корне проекта: `SingAR 2.2.5.dmg` + `SingAR 2.2.5.dmg.sha256`.
 Версия (`CFBundleShortVersionString`, имя DMG) берётся только из `Sources/SingAR/Config/AppVersion.swift` (`AppVersion.current`) — хардкод-фолбэка нет, при отсутствии версии сборка падает. Предыдущий DMG сохраняется как `*.prev.dmg` для rollback.
 
 ---
@@ -152,7 +152,7 @@ SingAR/
 │   ├── ASR/                   # Движки ASR (Whisper Metal, Gemini, Groq, OpenRouter)
 │   ├── Audio/                 # Захват аудио (CoreAudio, VAD, SoundFeedback)
 │   ├── Commands/              # Голосовые команды
-│   ├── Config/                # AppVersion (2.2.4)
+│   ├── Config/                # AppVersion (2.2.5)
 │   ├── Dictation/             # DictationController, Normalizer, History
 │   ├── Extensions/            # SwiftUI-расширения (Color+Brand)
 │   ├── Hotkey/                # Перехват глобальных горячих клавиш

@@ -5,12 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.4] - 2026-09-12
+## [2.2.5] - 2026-09-14
 
-### Fixed
-- **Мультимониторное позиционирование и гарантированная видимость капсулы**: индикатор статуса теперь всегда строго отображается на главном экране macOS (`NSScreen.screens.first`) под строкой меню. Если иконка меню-бара находится на главном экране — привязка строго под ней; если на другом мониторе — капсула плавно появляется по центру верхней строки главного экрана.
-- **Плавная анимация Apple Fluid Droplet без сжатия окна**: устранено деструктивное сжатие окна AppKit до 40x12, ломавшее Auto Layout и скрывавшее содержимое капсулы. Вытекание из строки меню теперь реализовано через нативную трансформацию слоя `CALayer` (`translation` + `scale` $\to$ `identity` с пружинной кривой `(0.16, 1.0, 0.30, 1.0)`).
-- **Надежная Smart Media Pause через CoreAudio + MediaRemote**: устранена проблема, из-за которой Яндекс.Музыка и фоновое видео в браузерах не ставились на паузу. Добавлена прямая детекция активных аудио-потоков через CoreAudio (`kAudioProcessPropertyIsRunningOutput`), снята блокирующая повторная проверка в `pauseBackgroundMedia()`. Теперь Яндекс.Музыка, YouTube, Firefox, Chrome, Safari и сторонние плееры мгновенно встают на паузу при старте речи и возобновляются после завершения диктовки. Полная безопасность от случайного запуска Apple Music сохранена.
+> **Патч безопасности (Stages 0–4 ref-аудита)** поверх продуктового релиза 2.2.4 — работа коммита `593d732` (30 файлов), не продуктового `b63d2e6`. 184 unit-теста проходят (`swift test`, 0 failures). Локальная ad-hoc сборка `SingAR 2.2.5.dmg` + `SingAR 2.2.5.dmg.sha256` (SHA-256 — TBD после сборки); тег `v2.2.5` и GitHub Release ещё не ставились.
 
 ### Security & Architecture (Ref-аудит, Этапы 0–3)
 - **Ключи только в заголовках**: API-ключ передаётся исключительно в заголовке `x-goog-api-key` (аналог Bearer) — никогда в query-параметрах URL ([SecretStore.swift](Sources/SingAR/Settings/SecretStore.swift:145)).
@@ -23,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Стороны Option**: корректное различение Right-Option (keyCode 58/61) и Fn/Globe (63) ([HotkeyManager.swift](Sources/SingAR/Hotkey/HotkeyManager.swift:46)).
 - **Минимальные entitlements**: только audio-input, speech-recognition, network.client ([SingAR.entitlements](Resources/SingAR.entitlements)).
 - **CI-доказательность**: секрет-скан с негативным канареечным тестом и `build_dmg.sh --dry-run` в [ci.yml](.github/workflows/ci.yml).
+
+## [2.2.4] - 2026-09-12
+
+### Fixed
+- **Мультимониторное позиционирование и гарантированная видимость капсулы**: индикатор статуса теперь всегда строго отображается на главном экране macOS (`NSScreen.screens.first`) под строкой меню. Если иконка меню-бара находится на главном экране — привязка строго под ней; если на другом мониторе — капсула плавно появляется по центру верхней строки главного экрана.
+- **Плавная анимация Apple Fluid Droplet без сжатия окна**: устранено деструктивное сжатие окна AppKit до 40x12, ломавшее Auto Layout и скрывавшее содержимое капсулы. Вытекание из строки меню теперь реализовано через нативную трансформацию слоя `CALayer` (`translation` + `scale` $\to$ `identity` с пружинной кривой `(0.16, 1.0, 0.30, 1.0)`).
+- **Надежная Smart Media Pause через CoreAudio + MediaRemote**: устранена проблема, из-за которой Яндекс.Музыка и фоновое видео в браузерах не ставились на паузу. Добавлена прямая детекция активных аудио-потоков через CoreAudio (`kAudioProcessPropertyIsRunningOutput`), снята блокирующая повторная проверка в `pauseBackgroundMedia()`. Теперь Яндекс.Музыка, YouTube, Firefox, Chrome, Safari и сторонние плееры мгновенно встают на паузу при старте речи и возобновляются после завершения диктовки. Полная безопасность от случайного запуска Apple Music сохранена.
 
 ## [2.2.3] - 2026-09-12
 
@@ -82,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Типизированные `CloudASRError` без раскрытия секретов в логах.
 - Fail-closed AX-защита цели вставки: запись только в верифицированный элемент.
 
+[2.2.5]: https://github.com/zevatov/SingAR/compare/2.2.4...2.2.5
 [2.2.4]: https://github.com/zevatov/SingAR/compare/2.2.3...2.2.4
 [2.2.3]: https://github.com/zevatov/SingAR/compare/2.2.2...2.2.3
 [2.2.2]: https://github.com/zevatov/SingAR/compare/2.2.1...2.2.2
