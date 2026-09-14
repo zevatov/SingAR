@@ -44,21 +44,43 @@ extension DictationController {
         // generation guard against the current controller state.
         let captureSucceeded = focusTargetGate.captureSessionTarget(generation: sessionGeneration)
         guard captureSucceeded else {
-            // FIX-STEP1: discriminate the refusal CAUSE (presentation + log
+            // FIX-B1: discriminate the refusal CAUSE (presentation + log
             // only). The gate verdict above stays authoritative — this is a
             // double-check of the accessibility status AFTER the refusal, so
             // an explicitly denied AX surfaces the Settings path instead of
-            // the generic "focus the field" hint.
+            // the generic "focus the field" hint. Self-frontmost (empty
+            // Settings/Onboarding chrome) gets a dedicated hint; no user
+            // content is read from the frontmost app.
             let axStatus = PermissionChecker.shared.status(of: .accessibility)
-            let refusalMessage = Self.refusalMessage(axStatus: axStatus)
+            let selfIsFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                == Bundle.main.bundleIdentifier
+            let refusalMessage = Self.refusalMessage(
+                axStatus: axStatus,
+                selfIsFrontmost: selfIsFrontmost
+            )
             NSLog("[SingAR] no AX-verifiable editable target — not starting dictation")
-            // FIX-STEP1: the refusal cause goes to singar.log too (AppLogger
+            // FIX-B1: the refusal cause goes to singar.log too (AppLogger
             // itself mirrors into NSLog). Content-free: status only.
-            switch Self.refusalReason(axStatus: axStatus) {
+            switch Self.refusalReason(axStatus: axStatus, selfIsFrontmost: selfIsFrontmost) {
             case .axDenied:
                 AppLogger.shared.log("capture refused: axUnavailable")
+            case .selfFrontmost:
+                AppLogger.shared.log("capture refused: selfFrontmost")
             case .focusOrSecureInput:
                 AppLogger.shared.log("capture refused: focus/secureInput")
+            }
+            // FIX-B2: second readFocusedFacts is log-only (not a capture).
+            // Self-frontmost already returns nil from the live probe.
+            // Never log value / window title / document text.
+            if let facts = LiveAXFocusProbe().readFocusedFacts() {
+                AppLogger.shared.log(
+                    Self.refusalDiagnosticsLog(
+                        role: facts.identity.role,
+                        settable: facts.isValueSettable
+                    )
+                )
+            } else {
+                AppLogger.shared.log(Self.refusalDiagnosticsLog(role: nil, settable: nil))
             }
             focusTargetGate.invalidate(generation: sessionGeneration)
             cancelGate.cancel()

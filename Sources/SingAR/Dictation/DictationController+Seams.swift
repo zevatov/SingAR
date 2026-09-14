@@ -45,38 +45,66 @@ extension DictationController {
     // EXISTING indicator mechanism. Presentation only: no session, no writes,
     // no capture fallback — the gate's verdict stays authoritative.
 
-    /// Human-readable, content-free reason for a refused start (one generic
-    /// message for every fail-closed denial reason).
+    /// Human-readable, content-free reason for a refused start (generic
+    /// message when AX is not denied and SingAR is not frontmost).
     /// Этап 2: `nonisolated` — константы/чистые решения без состояния.
     nonisolated static let startRefusalMessage = "Кликните в текстовое поле и повторите"
 
-    /// FIX-STEP1: discriminated refusal cause (presentation only). The
+    /// FIX-B1: discriminated refusal cause (presentation only). The
     /// fail-closed gate verdict stays authoritative; only the capsule text
     /// and the cause log line differ.
     enum StartRefusalReason: Equatable {
         case axDenied
+        case selfFrontmost
         case focusOrSecureInput
     }
 
     /// FIX-STEP1 message for the accessibility-denied refusal.
     nonisolated static let axDeniedRefusalMessage = "Нужен доступ: Настройки → Конфиденциальность → Универсальный доступ"
 
-    /// FIX-STEP1 decision (regression-tested): an explicit accessibility
-    /// denial surfaces the Settings path; every other fail-closed denial
-    /// (secure input, no focused element, non-settable target) keeps the
-    /// original generic message. `unknown`/`granted` fail closed to the
-    /// generic path (never claims an AX problem it cannot prove).
-    nonisolated static func refusalReason(axStatus: PermissionStatus) -> StartRefusalReason {
-        axStatus == .denied ? .axDenied : .focusOrSecureInput
+    /// FIX-B1: SingAR itself is frontmost, so the probe cannot capture a
+    /// foreign editable target. Presentation only — no capture fallback.
+    nonisolated static let selfFrontmostRefusalMessage = "Окно SingAR в фокусе — кликните в поле целевого приложения"
+
+    /// FIX-B1 decision (regression-tested): explicit AX denial wins; else a
+    /// self-frontmost window gets the dedicated hint; every other fail-closed
+    /// denial (secure input, no focused element, non-settable / non-whitelisted
+    /// role) keeps the generic message. `unknown`/`granted` never claim an AX
+    /// problem they cannot prove. Default `selfIsFrontmost: false` keeps the
+    /// FIX-STEP1 call sites source-compatible.
+    nonisolated static func refusalReason(
+        axStatus: PermissionStatus,
+        selfIsFrontmost: Bool = false
+    ) -> StartRefusalReason {
+        if axStatus == .denied { return .axDenied }
+        if selfIsFrontmost { return .selfFrontmost }
+        return .focusOrSecureInput
     }
 
-    /// FIX-STEP1 decision (regression-tested): capsule message for a given
-    /// accessibility status. Takes the status as a plain value so the decision
-    /// is unit-testable without touching real AX APIs.
-    nonisolated static func refusalMessage(axStatus: PermissionStatus) -> String {
-        refusalReason(axStatus: axStatus) == .axDenied
-            ? axDeniedRefusalMessage
-            : startRefusalMessage
+    /// FIX-B1 decision (regression-tested): capsule message for a given
+    /// accessibility status and whether SingAR is the frontmost app. Takes
+    /// plain values so the decision is unit-testable without real AX APIs.
+    nonisolated static func refusalMessage(
+        axStatus: PermissionStatus,
+        selfIsFrontmost: Bool = false
+    ) -> String {
+        switch refusalReason(axStatus: axStatus, selfIsFrontmost: selfIsFrontmost) {
+        case .axDenied:
+            return axDeniedRefusalMessage
+        case .selfFrontmost:
+            return selfFrontmostRefusalMessage
+        case .focusOrSecureInput:
+            return startRefusalMessage
+        }
+    }
+
+    /// FIX-B2: content-free diagnostic line after a refused capture.
+    /// Logs AX role + settable flag only — never value/title/document text.
+    nonisolated static func refusalDiagnosticsLog(role: String?, settable: Bool?) -> String {
+        guard let settable else {
+            return "capture refused diagnostics: facts=nil"
+        }
+        return "capture refused diagnostics: role=\(role ?? "nil") settable=\(settable)"
     }
 
     /// The refusal capsule auto-hides on the same 1.2s window every other

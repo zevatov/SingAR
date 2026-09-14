@@ -18,9 +18,6 @@ final class WindowManager: ObservableObject {
             return
         }
 
-        let settingsView = SettingsView()
-        let hostingView = NSHostingView(rootView: settingsView)
-
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 640),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -28,7 +25,7 @@ final class WindowManager: ObservableObject {
             defer: false
         )
         window.title = "SingAR — Настройки"
-        window.contentView = hostingView
+        window.contentViewController = NSHostingController(rootView: SettingsView())
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
@@ -64,9 +61,6 @@ final class WindowManager: ObservableObject {
             return
         }
 
-        let onboardingView = OnboardingView()
-        let hostingView = NSHostingView(rootView: onboardingView)
-
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
             styleMask: [.titled, .closable],
@@ -74,7 +68,7 @@ final class WindowManager: ObservableObject {
             defer: false
         )
         window.title = "Добро пожаловать в SingAR"
-        window.contentView = hostingView
+        window.contentViewController = NSHostingController(rootView: OnboardingView())
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true

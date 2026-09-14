@@ -67,11 +67,11 @@ final class StartRefusalFeedbackTests: XCTestCase {
         XCTAssertFalse(message.lowercased().contains("pid"))
     }
 
-    // MARK: FIX-STEP1 — refusal cause discrimination (presentation only)
+    // MARK: FIX-STEP1 / FIX-B1 — refusal cause discrimination (presentation only)
 
     func testDeniedAccessibilityRefusalPointsToSettings() {
         // AX explicitly denied ⇒ the capsule must name the Settings path,
-        // not the generic "focus the field" hint.
+        // not the generic "focus the field" hint. Denied wins over self-frontmost.
         XCTAssertEqual(
             DictationController.refusalMessage(axStatus: .denied),
             "Нужен доступ: Настройки → Конфиденциальность → Универсальный доступ"
@@ -80,17 +80,48 @@ final class StartRefusalFeedbackTests: XCTestCase {
             DictationController.refusalReason(axStatus: .denied),
             .axDenied
         )
+        XCTAssertEqual(
+            DictationController.refusalMessage(axStatus: .denied, selfIsFrontmost: true),
+            DictationController.axDeniedRefusalMessage
+        )
+        XCTAssertEqual(
+            DictationController.refusalReason(axStatus: .denied, selfIsFrontmost: true),
+            .axDenied
+        )
+    }
+
+    func testSelfFrontmostWithGrantedAXShowsDedicatedMessage() {
+        XCTAssertEqual(
+            DictationController.refusalMessage(axStatus: .granted, selfIsFrontmost: true),
+            "Окно SingAR в фокусе — кликните в поле целевого приложения"
+        )
+        XCTAssertEqual(
+            DictationController.refusalReason(axStatus: .granted, selfIsFrontmost: true),
+            .selfFrontmost
+        )
+        let message = DictationController.selfFrontmostRefusalMessage
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertFalse(message.contains("4242"))
+        XCTAssertFalse(message.lowercased().contains("pid"))
     }
 
     func testGrantedAccessibilityRefusalKeepsGenericMessage() {
-        // AX granted but capture still refused (secure input / no focused
-        // element / non-settable target) ⇒ the ORIGINAL generic message.
+        // AX granted, SingAR not frontmost, capture still refused (secure
+        // input / no focused element / non-settable target) ⇒ generic message.
         XCTAssertEqual(
             DictationController.refusalMessage(axStatus: .granted),
             DictationController.startRefusalMessage
         )
         XCTAssertEqual(
+            DictationController.refusalMessage(axStatus: .granted, selfIsFrontmost: false),
+            "Кликните в текстовое поле и повторите"
+        )
+        XCTAssertEqual(
             DictationController.refusalReason(axStatus: .granted),
+            .focusOrSecureInput
+        )
+        XCTAssertEqual(
+            DictationController.refusalReason(axStatus: .granted, selfIsFrontmost: false),
             .focusOrSecureInput
         )
     }
@@ -114,6 +145,21 @@ final class StartRefusalFeedbackTests: XCTestCase {
         XCTAssertFalse(message.contains("4242"))
         XCTAssertFalse(message.lowercased().contains("pid"))
         XCTAssertTrue(message.contains("Универсальный доступ"))
+    }
+
+    func testRefusalDiagnosticsLogIsContentFree() {
+        XCTAssertEqual(
+            DictationController.refusalDiagnosticsLog(role: nil, settable: nil),
+            "capture refused diagnostics: facts=nil"
+        )
+        XCTAssertEqual(
+            DictationController.refusalDiagnosticsLog(role: "AXWindow", settable: false),
+            "capture refused diagnostics: role=AXWindow settable=false"
+        )
+        let line = DictationController.refusalDiagnosticsLog(role: "AXTextArea", settable: true)
+        XCTAssertFalse(line.lowercased().contains("value"))
+        XCTAssertFalse(line.lowercased().contains("title"))
+        XCTAssertFalse(line.contains("Document"))
     }
 
     func testRefusalHideWindowMatchesExistingFailurePaths() {
