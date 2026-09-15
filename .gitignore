@@ -16,6 +16,8 @@ ModuleCache/
 **/Applications
 dmg-staging/
 *.dmg
+*.dmg.sha256
+*.sha256
 *.pkg
 
 # Heavy ML Models and binaries

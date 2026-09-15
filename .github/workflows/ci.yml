@@ -55,6 +55,20 @@ jobs:
             echo "PASS: no leaked secrets in Sources/ (0 matches)."
           fi
 
+      - name: Version hygiene — scan for hardcoded version outside allowlist (G4-4)
+        run: |
+          set -euo pipefail
+          VERSION=$(grep 'static let current' Sources/SingAR/Config/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Checking for unexpected occurrences of version $VERSION outside allowlist..."
+          # Allowlist for code/scripts: ONLY Sources/SingAR/Config/AppVersion.swift
+          HITS=$(grep -REnI "$VERSION" Sources/ scripts/ | grep -v 'Sources/SingAR/Config/AppVersion.swift' || true)
+          if [ -n "$HITS" ]; then
+            echo "FATAL: version $VERSION hardcoded outside allowlist (only Sources/SingAR/Config/AppVersion.swift permitted):" >&2
+            echo "$HITS" >&2
+            exit 1
+          fi
+          echo "PASS: version $VERSION is not hardcoded outside allowlist in Sources/ or scripts/."
+
       - name: Release hygiene — build_dmg.sh --dry-run (no full DMG build)
         run: |
           set -euo pipefail

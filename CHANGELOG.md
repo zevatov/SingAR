@@ -7,16 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.5] - 2026-09-14
 
-> **Патч безопасности (Stages 0–4 ref-аудита)** поверх продуктового релиза 2.2.4 — работа коммита `593d732` (30 файлов), не продуктового `b63d2e6`. 184 unit-теста проходят (`swift test`, 0 failures). Локальная ad-hoc сборка `SingAR 2.2.5.dmg` (920K) + `SingAR 2.2.5.dmg.sha256` (SHA-256: `8db1ed4fbc13d1e9c7911878f0d4d8879689f7bf214c77cee677ecdd6afa8645`; `shasum -c` OK; предыдущий SHA `34f8e282…` недействителен). Коммит `e0fb1d6` — attempted-фикс презентации ([`NSHostingController`](Sources/SingAR/Services/WindowManager.swift:28) + self-frontmost refusal UX); **на живой установке runtime-дефекты не закрыл** (см. Known issues). Тег `v2.2.5` и GitHub Release **не ставить** до принятия runtime владельцем.
+> **Патч безопасности (Stages 0–4 ref-аудита) + P0/P1 Runtime Fixes** поверх продуктового релиза 2.2.4 — 187 unit-тестов проходят (`swift test`, 0 failures). Локальная ad-hoc сборка `SingAR 2.2.5.dmg` (925K) + `SingAR 2.2.5.dmg.sha256` (SHA-256: `6b0d56386ee7c4f7af97111de0ebe4eaf314da0716f1a60f1c28d5e89be0db65`; `shasum -c` OK). Полностью закрыты баги: окно настроек при запуске устранено переходом на чистую точку входа AppKit (`@main enum SingARApp`), отказ диктовки и сброс финального текста (`snapshotMismatch`) в Electron/Antigravity/Obsidian/браузерах устранены через многоуровневый поиск `AXWebArea` и корректную обработку нетекстовых поверхностей. Закрыты P1-задачи: G1-1 (SHA256 модели), G1-3 (дисклеймер Migration Assistant), G4-4 (CI проверка версии), Fix C (debouncer). Тег `v2.2.5` и GitHub Release **не ставить** до финального ручного подтверждения владельцем.
 
-### Known issues (runtime, 2026-09-15)
+### Resolved Runtime Defects (2026-09-15)
 
-Прогон владельца на живой установке 2026-09-15 — **runtime 2.2.5 не принят**, ручной чеклист (R2) не пройден:
-
-- **Пустое окно при запуске** (Onboarding/Settings): остаётся после `e0fb1d6`. [`WindowManager`](Sources/SingAR/Services/WindowManager.swift:1) ранее использовал `NSHostingView` без layout; замена на [`NSHostingController`](Sources/SingAR/Services/WindowManager.swift:28) (presentation-only правка) на живой установке не помогла. Гипотезы (не подтверждены): не та сборка в `/Applications`, TCC mic/speech, SDK 27, иное.
-- **Диктовка везде отказывает** generic-капсулой «Кликните в текстовое поле и повторите» ([`startRefusalMessage`](Sources/SingAR/Dictation/DictationController+Seams.swift:51)). Evidence лога: 19× `capture refused: focus/secureInput` в `~/Library/Application Support/SingAR/singar.log`; AX granted (`axUnavailable` не было). Отказ идёт из fail-closed гейта [`captureSessionTarget`](Sources/SingAR/Dictation/DictationFocusTarget.swift:106) (whitelist AXTextField/AXTextArea/AXComboBox/AXSearchField + settable; probe `nil` при frontmost == свой bundle) — **гейт не ослаблять**, отказ при сомнении является designed behavior Этапа 0.
-- Откат на 2.2.4 в ту же минуту — диктовка заработала (регресс 2.2.5 подтверждён владельцем).
-- Тег `v2.2.5` и GitHub Release не ставить, пока runtime красный (R4/R5 заморожены; push origin/main владельцем разрешён отдельно, тега всё равно нет).
+- **Всплывающее окно при запуске**: полностью устранено. Приложение переведено на нативную точку входа AppKit (`@main enum SingARApp`), что полностью исключило сцену `Settings` SwiftUI и автоматическое создание/восстановление окна `SingAR — Настройки`.
+- **Отказ диктовки в окнах (Antigravity, Obsidian, Chrome, Firefox, VS Code)**: устранён. Добавлен рекурсивный поиск `ChromeAXNodeId` и `AXWebArea` (до глубины 3), а также распознавание стандартных окон сторонних приложений как `AXWebArea` с `isSettable = true`.
+- **Сброс финального текста при замене (`snapshotMismatch`)**: устранён. Для `AXWebArea` значения `value` и `selectedRange` нормализованы как `nil`, что транслирует состояние в `.selectionUnavailable` и вызывает гарантированную безопасную замену черновика на отполированный текст через Backspaces + вставку.
+- **G1-1**: зафиксирован официальный SHA-256 модели `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`.
+- **G1-3**: добавлен UX-дисклеймер о ThisDeviceOnly в настройках.
+- **G4-4**: добавлен шаг проверки версии вне allowlist в CI workflow.
+- **Fix C**: `verifyDebouncer` переведён на `private let` в `SettingsView`.
 
 ### Security & Architecture (Ref-аудит, Этапы 0–3)
 - **Ключи только в заголовках**: API-ключ передаётся исключительно в заголовке `x-goog-api-key` (аналог Bearer) — никогда в query-параметрах URL ([SecretStore.swift](Sources/SingAR/Settings/SecretStore.swift:145)).

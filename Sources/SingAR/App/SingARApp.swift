@@ -1,14 +1,14 @@
-import SwiftUI
+import AppKit
 
 /// Main entry point for SingAR.
-/// A lightweight, privacy-first, Open-Source voice dictation assistant for macOS (Gemini 3.5).
+/// A lightweight, privacy-first, Open-Source voice dictation assistant for macOS.
 @main
-struct SingARApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-    var body: some Scene {
-        Settings {
-            EmptyView()
-        }
+enum SingARApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
     }
 }
+

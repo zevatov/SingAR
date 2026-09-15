@@ -85,6 +85,7 @@ final class AppSettings: ObservableObject {
         static let language        = "language"
         static let launchAtLogin   = "launchAtLogin"
         static let stopOnFocusLoss = "stopOnFocusLoss"
+        static let hasCompletedOnboarding = "hasCompletedOnboarding"
     }
 
     // MARK: Bool toggles
@@ -112,6 +113,9 @@ final class AppSettings: ObservableObject {
     }
     @Published var cloudCleanup: Bool {
         didSet { defaults.set(cloudCleanup, forKey: Key.cloudCleanup) }
+    }
+    @Published var hasCompletedOnboarding: Bool {
+        didSet { defaults.set(hasCompletedOnboarding, forKey: Key.hasCompletedOnboarding) }
     }
 
     // MARK: Enum options
@@ -143,6 +147,7 @@ final class AppSettings: ObservableObject {
             Key.language:        ASRLanguage.auto.rawValue,
             Key.launchAtLogin:   false,
             Key.stopOnFocusLoss: true,
+            Key.hasCompletedOnboarding: false,
         ])
 
         self.enabled = defaults.bool(forKey: Key.enabled)
@@ -153,6 +158,7 @@ final class AppSettings: ObservableObject {
         self.launchAtLogin = defaults.bool(forKey: Key.launchAtLogin)
         self.stopOnFocusLoss = defaults.object(forKey: Key.stopOnFocusLoss) as? Bool ?? true
         self.cloudCleanup = defaults.object(forKey: Key.cloudCleanup) as? Bool ?? true
+        self.hasCompletedOnboarding = defaults.bool(forKey: Key.hasCompletedOnboarding)
 
         self.mode = DictationMode(rawValue: defaults.string(forKey: Key.mode) ?? "") ?? .toggle
         self.hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption

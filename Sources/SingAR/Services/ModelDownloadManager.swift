@@ -11,12 +11,8 @@ final class ModelDownloadManager: NSObject, ObservableObject, URLSessionDownload
     static let modelFileName = "ggml-large-v3-turbo.bin"
     static let downloadURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin")!
 
-    /// Этап 1: ожидаемый SHA256 модели ggml-large-v3-turbo.bin (hex, 64 символа).
-    /// nil = официальный хэш ещё не зафиксирован (см. docs/ref-audit-handoffs.md §4.5):
-    /// download-time проверка пропускается, поведение как в Этапе 0.
-    /// Когда хэш будет зафиксирован — положить hex сюда, verify станет fail-closed.
-    /// Pure-seam тесты используют verifySHA256(data:expected:) напрямую, без сети.
-    static let expectedSHA256: String? = nil
+    /// G1-1: официальный SHA256 модели ggml-large-v3-turbo.bin от ggerganov/whisper.cpp (HuggingFace LFS).
+    static let expectedSHA256: String? = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
 
     enum ModelStatus: Equatable {
         case notDownloaded

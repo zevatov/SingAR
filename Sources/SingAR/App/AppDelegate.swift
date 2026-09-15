@@ -55,13 +55,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Install global hotkey monitor
         hotkey.install()
 
-        // If permissions are not granted, present the Onboarding window without system alert spam
-        let hasAllPermissions = PermissionChecker.shared.allGranted
-        if !hasAllPermissions {
+        // Ensure no stray windows are visible on launch (menu bar accessory app)
+        DispatchQueue.main.async {
+            for window in NSApp.windows {
+                window.orderOut(nil)
+            }
+        }
+
+        // Present Onboarding on first launch only if essential permissions (mic + AX) are missing
+        let shouldShowOnboarding = !AppSettings.shared.hasCompletedOnboarding && !PermissionChecker.shared.corePermissionsGranted
+        if shouldShowOnboarding {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 WindowManager.shared.showOnboarding()
             }
         }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {

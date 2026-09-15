@@ -7,7 +7,7 @@
 [![macOS](https://img.shields.io/badge/macOS-14.0%2B-black?style=flat&logo=apple)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-6.0%2B-F05138?style=flat&logo=swift)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-0078D7?style=flat)](https://developer.apple.com/metal/)
-[![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
+[![Tests](https://img.shields.io/badge/tests-187%20passing-brightgreen.svg)](https://github.com/zevatov/SingAR)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-2.2.5-brightgreen.svg)](https://github.com/zevatov/SingAR/releases)
 

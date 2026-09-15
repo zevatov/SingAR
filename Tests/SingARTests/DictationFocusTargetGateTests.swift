@@ -101,6 +101,14 @@ final class DictationFocusTargetGateTests: XCTestCase {
         XCTAssertEqual(gate.capturedGeneration, 7)
     }
 
+    func testCaptureAllowsWebAreaTarget() {
+        let probe = FakeAXFocusProbe()
+        probe.facts = facts(identity: identity(role: "AXWebArea", title: "Editor"), settable: true)
+        let gate = DictationFocusTargetGate(probe: probe)
+        XCTAssertTrue(gate.captureSessionTarget(generation: 1))
+        XCTAssertNil(gate.canMutate(generation: 1))
+    }
+
     // MARK: Identity / PID checks before mutation
 
     func testSamePIDDifferentElementDenied() {

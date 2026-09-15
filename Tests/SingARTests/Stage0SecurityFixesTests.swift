@@ -58,6 +58,7 @@ final class Stage0SecurityFixesTests: XCTestCase {
         XCTAssertTrue(DictationFocusTargetGate.isEditableRole("AXTextArea"))
         XCTAssertTrue(DictationFocusTargetGate.isEditableRole("AXComboBox"))
         XCTAssertTrue(DictationFocusTargetGate.isEditableRole("AXSearchField"))
+        XCTAssertTrue(DictationFocusTargetGate.isEditableRole("AXWebArea"))
         // Дефолт — запрет:
         XCTAssertFalse(DictationFocusTargetGate.isEditableRole(nil))
         XCTAssertFalse(DictationFocusTargetGate.isEditableRole("AXStaticText"))
@@ -110,7 +111,7 @@ final class Stage0SecurityFixesTests: XCTestCase {
     }
 
     func testCaptureAllowsWhitelistRoleWithSettable() {
-        for role in ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] {
+        for role in ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXWebArea"] {
             let probe = FakeProbe()
             probe.facts = facts(role: role, settable: true)
             let gate = DictationFocusTargetGate(probe: probe)

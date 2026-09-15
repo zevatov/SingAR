@@ -25,7 +25,10 @@ final class WindowManager: ObservableObject {
             defer: false
         )
         window.title = "SingAR — Настройки"
-        window.contentViewController = NSHostingController(rootView: SettingsView())
+        let hostingView = NSHostingView(rootView: SettingsView())
+        hostingView.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 540, height: 640)
+        hostingView.autoresizingMask = [.width, .height]
+        window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
@@ -48,6 +51,7 @@ final class WindowManager: ObservableObject {
     @objc private func settingsWindowWillClose(notification: Notification) {
         if let window = notification.object as? NSWindow, window == settingsWindow {
             settingsWindow = nil
+            NSApp.deactivate()
         }
     }
 
@@ -68,7 +72,10 @@ final class WindowManager: ObservableObject {
             defer: false
         )
         window.title = "Добро пожаловать в SingAR"
-        window.contentViewController = NSHostingController(rootView: OnboardingView())
+        let hostingView = NSHostingView(rootView: OnboardingView())
+        hostingView.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 520, height: 440)
+        hostingView.autoresizingMask = [.width, .height]
+        window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
@@ -92,11 +99,13 @@ final class WindowManager: ObservableObject {
     func closeOnboarding() {
         onboardingWindow?.performClose(nil)
         onboardingWindow = nil
+        NSApp.deactivate()
     }
 
     @objc private func onboardingWindowWillClose(notification: Notification) {
         if let window = notification.object as? NSWindow, window == onboardingWindow {
             onboardingWindow = nil
+            NSApp.deactivate()
         }
     }
 

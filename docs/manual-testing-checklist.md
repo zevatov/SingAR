@@ -1,6 +1,6 @@
 # SingAR 2.2.5: Руководство по изменениям и Чек-лист ручного тестирования
 
-Все задачи архитектурного цикла v2.2.1–v2.2.5 успешно реализованы и проверены. Все **184 автоматических теста** компилируются и проходят без единой ошибки (`0 failures`).
+Все задачи архитектурного цикла v2.2.1–v2.2.5 успешно реализованы и проверены. Все **187 автоматических тестов** компилируются и проходят без единой ошибки (`0 failures`).
 
 ---
 
@@ -20,11 +20,11 @@
 
 ## 💿 Сборка релизного DMG (v2.2.5)
 
-Скрипт: `./scripts/build_dmg.sh` (собрано 2026-09-14, после коммита `e0fb1d6`)
-- **Образ:** `SingAR 2.2.5.dmg` (в корне проекта; Размер: 920K)
+Скрипт: `./scripts/build_dmg.sh`
+- **Образ:** `SingAR 2.2.5.dmg` (в корне проекта; Размер: 925K)
 - **Приложение:** `SingAR 2.2.5.app` (Bundle ID: `com.singar.app`, Версия: `2.2.5`)
 - **Подпись:** Ad-hoc hardened runtime с entitlements (`Resources/SingAR.entitlements`); `spctl` rejection ожидаем
-- **SHA-256:** `8db1ed4fbc13d1e9c7911878f0d4d8879689f7bf214c77cee677ecdd6afa8645` — зафиксирован в `SingAR 2.2.5.dmg.sha256`, `shasum -a 256 -c` OK (предыдущий SHA `34f8e282…` недействителен)
+- **SHA-256:** `6b0d56386ee7c4f7af97111de0ebe4eaf314da0716f1a60f1c28d5e89be0db65` — зафиксирован в `SingAR 2.2.5.dmg.sha256`, `shasum -a 256 -c` OK
 
 ---
 
@@ -32,8 +32,8 @@
 
 Команда: `swift test`
 ```text
-Test Suite 'All tests' passed at 2026-09-14.
-	 Executed 184 tests, with 0 failures (0 unexpected)
+Test Suite 'All tests' passed at 2026-09-15.
+	 Executed 187 tests, with 0 failures (0 unexpected)
 ✔ Test run passed.
 ```
 

@@ -39,13 +39,13 @@ final class Stage1SecurityTests: XCTestCase {
         XCTAssertEqual(fileHex.count, 64)
     }
 
-    func testIsDownloadedFileValidSkipsWhenExpectedNil() throws {
-        // expectedSHA256 == nil (официальный хэш не зафиксирован) → пропуск проверки.
-        XCTAssertNil(ModelDownloadManager.expectedSHA256)
+    func testIsDownloadedFileValidEnforcesExpectedSHA256() throws {
+        // G1-1: официальный SHA256 апстрима зафиксирован → fail-closed проверка активна.
+        XCTAssertEqual(ModelDownloadManager.expectedSHA256, "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69")
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("singar-stage1-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: tmp) }
         try Data("anything".utf8).write(to: tmp, options: .atomic)
-        XCTAssertTrue(ModelDownloadManager.isDownloadedFileValid(at: tmp))
+        XCTAssertFalse(ModelDownloadManager.isDownloadedFileValid(at: tmp), "чужой хэш обязан отклоняться (fail-closed)")
     }
 
     // MARK: 2. Keychain ThisDeviceOnly + фиксированный service

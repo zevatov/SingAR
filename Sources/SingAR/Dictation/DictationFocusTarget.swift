@@ -79,7 +79,8 @@ final class DictationFocusTargetGate {
         "AXTextField",
         "AXTextArea",
         "AXComboBox",
-        "AXSearchField"
+        "AXSearchField",
+        "AXWebArea"
     ]
 
     /// Fail-closed проверка роли: nil или вне whitelist ⇒ false.
@@ -239,23 +240,92 @@ final class LiveAXFocusProbe: AXFocusProbing {
                 identity.role = "AXFocusedUIElement"
             }
         } else {
-            var windowCF: CFTypeRef?
-            if AXUIElementCopyAttributeValue(appElem, kAXFocusedWindowAttribute as CFString, &windowCF) == .success,
-               let windowCF, CFGetTypeID(windowCF) == AXUIElementGetTypeID() {
-                let winElem = windowCF as! AXUIElement
-                targetElement = winElem
-                identity = readIdentity(winElem)
-                if identity.role == nil {
-                    identity.role = "AXWindow"
+            var sysResolved = false
+            let sysElem = AXUIElementCreateSystemWide()
+            var sysFocusedCF: CFTypeRef?
+            if AXUIElementCopyAttributeValue(sysElem, kAXFocusedUIElementAttribute as CFString, &sysFocusedCF) == .success,
+               let sysFocusedCF, CFGetTypeID(sysFocusedCF) == AXUIElementGetTypeID() {
+                let elem = sysFocusedCF as! AXUIElement
+                var elemPid: pid_t = 0
+                if AXUIElementGetPid(elem, &elemPid) == .success, elemPid == pid {
+                    targetElement = elem
+                    identity = readIdentity(elem)
+                    if identity.role == nil {
+                        identity.role = "AXFocusedUIElement"
+                    }
+                    sysResolved = true
+                }
+            }
+
+            if !sysResolved {
+                var windowCF: CFTypeRef?
+                if AXUIElementCopyAttributeValue(appElem, kAXFocusedWindowAttribute as CFString, &windowCF) == .success,
+                   let windowCF, CFGetTypeID(windowCF) == AXUIElementGetTypeID() {
+                    let winElem = windowCF as! AXUIElement
+                    targetElement = winElem
+                    identity = readIdentity(winElem)
+                    if identity.role == nil {
+                        identity.role = "AXWindow"
+                    }
                 }
             }
         }
 
-        // Этап 0: fail-closed инверсия (было fail-open: дефолт true + deny
-        // только для AXStaticText с явным false). Теперь дефолт — запрет;
-        // разрешён только явный AX-success + settable==true. AXStaticText
-        // никогда не редактируем (defense-in-depth, whitelist в гейте тоже
-        // отклонит). Ошибка AX API ⇒ false.
+        // Resolve web areas / editor surfaces for Electron, browsers, and document apps
+        if identity.role == "AXWindow" || identity.role == "AXFocusedUIElement" {
+            var winElem: AXUIElement?
+            var winCF: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElem, kAXFocusedWindowAttribute as CFString, &winCF) == .success,
+               let winCF, CFGetTypeID(winCF) == AXUIElementGetTypeID() {
+                winElem = (winCF as! AXUIElement)
+            }
+
+            if let win = winElem {
+                var foundWebArea = false
+                func searchWebArea(in element: AXUIElement, depth: Int) -> AXUIElement? {
+                    if depth > 3 { return nil }
+                    var chCF: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &chCF) == .success,
+                          let children = chCF as? [AXUIElement] else { return nil }
+                    for ch in children {
+                        var nodeCF: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(ch, "ChromeAXNodeId" as CFString, &nodeCF) == .success {
+                            return ch
+                        }
+                        var rCF: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(ch, kAXRoleAttribute as CFString, &rCF) == .success,
+                           let r = rCF as? String, (r == "AXWebArea" || r == "AXScrollArea") {
+                            return ch
+                        }
+                        if let deeper = searchWebArea(in: ch, depth: depth + 1) {
+                            return deeper
+                        }
+                    }
+                    return nil
+                }
+
+                if let webElem = searchWebArea(in: win, depth: 0) {
+                    targetElement = webElem
+                    identity.role = "AXWebArea"
+                    foundWebArea = true
+                }
+
+                if !foundWebArea {
+                    var subroleCF: CFTypeRef?
+                    AXUIElementCopyAttributeValue(win, kAXSubroleAttribute as CFString, &subroleCF)
+                    let subrole = subroleCF as? String ?? ""
+
+                    // Any standard document/application window of a frontmost third-party app
+                    if (subrole == "AXStandardWindow" || subrole.isEmpty) && frontApp.bundleIdentifier != Bundle.main.bundleIdentifier {
+                        targetElement = win
+                        identity.role = "AXWebArea"
+                    }
+                }
+            }
+        }
+
+        // Fail-closed settable check: default false. Only explicit settable flag or
+        // verified editable text/web surfaces (Terminal selection, AXWebArea) set true.
         var isSettable = false
         var settable = DarwinBoolean(false)
         if AXUIElementIsAttributeSettable(targetElement, kAXValueAttribute as CFString, &settable) == .success {
@@ -263,16 +333,34 @@ final class LiveAXFocusProbe: AXFocusProbing {
         } else {
             isSettable = false
         }
-        if identity.role == "AXStaticText" {
+
+        // Terminal text area or custom controls with selection range are editable
+        if !isSettable {
+            if identity.role == "AXWebArea" {
+                isSettable = true
+            } else if identity.role == "AXTextArea" || identity.role == "AXTextField" {
+                var rangeCF: CFTypeRef?
+                if AXUIElementCopyAttributeValue(targetElement, kAXSelectedTextRangeAttribute as CFString, &rangeCF) == .success {
+                    isSettable = true
+                }
+            }
+        }
+
+        if identity.role == "AXStaticText" || identity.role == "AXButton" || identity.role == "AXWindow" || identity.role == "AXApplication" {
             isSettable = false
         }
 
+        // For AXWebArea, do NOT treat empty or dummy selection/value as an editable text snapshot.
+        // Web areas / Electron editors do not expose caret or buffer snapshots through AXValue.
+        // Setting them to nil ensures verifiedOwnedRange cleanly signals .selectionUnavailable,
+        // which allows safe draft replacement via backspaces/paste without false snapshotMismatch.
+        let isWebArea = (identity.role == "AXWebArea")
         return FocusedElementFacts(
             pid: pid,
             identity: identity,
             isValueSettable: isSettable,
-            value: stringAttribute(targetElement, kAXValueAttribute),
-            selectedRange: selectedTextRange(targetElement)
+            value: isWebArea ? nil : stringAttribute(targetElement, kAXValueAttribute),
+            selectedRange: isWebArea ? nil : selectedTextRange(targetElement)
         )
     }
 

@@ -15,7 +15,7 @@ struct SettingsView: View {
     /// Этап 3: 500-мс дебаунс авто-верификации (1 запрос на паузу ввода).
     /// Сеть трогает только после 500 мс тишины; каждая правка отменяет
     /// предыдущий запрос. Ручная кнопка «Проверить» идёт мимо дебаунса.
-    @State private var verifyDebouncer = KeyVerifyDebouncer()
+    private let verifyDebouncer = KeyVerifyDebouncer()
 
     @State private var isMicGranted = false
     @State private var isAccessibilityGranted = false
@@ -649,6 +649,10 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Text("Ключ хранится только на этом Mac (ThisDeviceOnly) и не переносится Migration Assistant — после переноса введите ключ заново.")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
         }
     }
 

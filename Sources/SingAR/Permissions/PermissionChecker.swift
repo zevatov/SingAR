@@ -84,6 +84,11 @@ final class PermissionChecker {
         PermissionKind.allCases.allSatisfy { status(of: $0) == .granted }
     }
 
+    /// True when the minimum essential permissions for dictation (mic + AX) are granted.
+    var corePermissionsGranted: Bool {
+        status(of: .microphone) == .granted && status(of: .accessibility) == .granted
+    }
+
     func request(_ kind: PermissionKind) {
         switch kind {
         case .microphone:        requestMicrophone()

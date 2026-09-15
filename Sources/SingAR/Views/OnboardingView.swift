@@ -189,6 +189,7 @@ struct OnboardingView: View {
 
             // Done Button
             Button(action: {
+                settings.hasCompletedOnboarding = true
                 if selectedMode == .local && modelManager.isModelInstalled {
                     settings.cloudModel = .localWhisperTurbo
                 } else {
@@ -205,7 +206,7 @@ struct OnboardingView: View {
             .tint(Color.brandAccent)
         }
         .padding(24)
-        .frame(width: 440)
+        .frame(minWidth: 440, maxWidth: .infinity, minHeight: 400, maxHeight: .infinity)
         .onAppear {
             refreshPermissions()
         }
