@@ -28,8 +28,16 @@ extension DictationController {
         // Silence / Noise Hallucination Gate:
         // If no human speech was detected during the recording session (vad.hasSpoken == false),
         // abort immediately. Skip cloud/local ASR entirely and do not insert garbage.
+        // The diagnostic line records frame counts and the current threshold;
+        // it does not change this decision.
+        vad.logSessionDiagnostic()
         if !vad.hasSpoken {
-            AppLogger.shared.log("🔇 stopDictation: no speech detected (vad.hasSpoken == false) — skipping ASR and injection")
+            AppLogger.shared.logPipeline(
+                stage: "vad",
+                code: "no_speech",
+                action: "skip_asr",
+                reason: "vad_has_spoken_false"
+            )
             audio.stop()
             localAsr.cancel()
             geminiAsr?.cancel()
@@ -147,13 +155,36 @@ extension DictationController {
                                 AppLogger.shared.log("✨ stopDictation: Polish finished in \(Int(Date().timeIntervalSince(polishStart) * 1000))ms: polished=\(AppLogger.redactedPreview(p))")
                             case .failure(let pe):
                                 polishError = pe
-                                AppLogger.shared.log("⚠️ stopDictation: polish failed (\(pe)) in \(Int(Date().timeIntervalSince(polishStart) * 1000))ms — using unpolished text")
+                                AppLogger.shared.logPipeline(
+                                    stage: "polish",
+                                    code: pe.logCode,
+                                    action: "fallback_unpolished",
+                                    reason: "\(pe.logReason) elapsed_ms=\(Int(Date().timeIntervalSince(polishStart) * 1000))"
+                                )
                             }
                         }
 
                         if let polished = polishedText, !polished.isEmpty {
                             finalText = self.processed(polished)
                             provider = self.settings.cloudModel.rawValue + "+polish"
+                        } else if self.settings.cloudModel == .localWhisperTurbo {
+                            let kept = Self.whisperFallbackText(liveOrLocal: finalText, cloudText: transcribed)
+                            if kept.isEmpty {
+                                cloudError = .emptySpeech
+                                AppLogger.shared.logPipeline(
+                                    stage: "asr",
+                                    code: "empty_result",
+                                    action: "skip_insert",
+                                    reason: "whisper_and_fallback_empty"
+                                )
+                                finalText = ""
+                            } else if transcribed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                // Cloud added nothing; `kept` is the text already processed above.
+                                finalText = kept
+                            } else {
+                                finalText = self.processed(kept)
+                            }
+                            provider = self.settings.cloudModel.rawValue
                         } else {
                             finalText = self.processed(transcribed)
                             provider = self.settings.cloudModel.rawValue
@@ -161,10 +192,49 @@ extension DictationController {
                         model = self.settings.cloudModel.rawValue
                     } else {
                         if case .failure(let e) = asrOutcome { cloudError = e }
-                        AppLogger.shared.log("⚠️ stopDictation: cloudTranscribe failed (\(String(describing: cloudError))) — using live/local text")
+                        let asrFailure = cloudError ?? .emptySpeech
+                        AppLogger.shared.logPipeline(
+                            stage: "asr",
+                            code: asrFailure.logCode,
+                            action: "fallback_live",
+                            reason: asrFailure.logReason
+                        )
+                        if self.settings.cloudModel == .localWhisperTurbo {
+                            let kept = Self.whisperFallbackText(liveOrLocal: finalText, cloudText: "")
+                            if kept.isEmpty {
+                                AppLogger.shared.logPipeline(
+                                    stage: "asr",
+                                    code: "empty_result",
+                                    action: "skip_insert",
+                                    reason: "whisper_and_fallback_empty"
+                                )
+                            }
+                            finalText = kept
+                        }
                     }
                 } else {
-                    AppLogger.shared.log("⚠️ stopDictation: cloud not available or WAV nil (available=\(self.cloud.available), captured=\(captured.count))")
+                    let wavMissing = self.cloud.available
+                    AppLogger.shared.logPipeline(
+                        stage: "asr",
+                        code: wavMissing ? "wav_encode_failed" : "cloud_unavailable",
+                        action: "skip_cloud",
+                        reason: "available=\(self.cloud.available) buffers=\(captured.count)"
+                    )
+                    if self.settings.cloudModel == .localWhisperTurbo {
+                        if !wavMissing {
+                            cloudError = .missingModel
+                        }
+                        let kept = Self.whisperFallbackText(liveOrLocal: finalText, cloudText: "")
+                        if kept.isEmpty {
+                            AppLogger.shared.logPipeline(
+                                stage: "asr",
+                                code: "empty_result",
+                                action: "skip_insert",
+                                reason: wavMissing ? "wav_encode_failed" : "cloud_unavailable"
+                            )
+                        }
+                        finalText = kept
+                    }
                 }
 
                 let textToCommit = finalText
@@ -333,6 +403,7 @@ extension DictationController {
             // polish error falls back silently, the unpolished
             // text is already committed above.
             let polishSurfaced = finalPolishError?.showsDedicatedMessage ?? false
+            let unpolishedStatus = Self.polishNeedsUnpolishedStatus(finalPolishError)
             // PRE-DMG-FIX-CAP: honest post-commit warning that the
             // recording was bounded by the local budget; the
             // committed text is the complete live draft.
@@ -343,8 +414,10 @@ extension DictationController {
             } else if polishSurfaced, let pe = finalPolishError {
                 self.statusBar.setStatus(.failed)
                 self.indicator.setStatus(.failed, message: pe.userMessage)
+            } else if unpolishedStatus {
+                self.indicator.setStatus(.inserting, message: Self.unpolishedInsertStatus)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + ((polishSurfaced || budgetSurfaced) ? 1.2 : 0.35)) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + ((polishSurfaced || budgetSurfaced || unpolishedStatus) ? 1.2 : 0.35)) { [weak self] in
                 guard let self, self.sessionGeneration == gen else { return }
                 self.indicator.hide()
                 self.statusBar.setStatus(.idle)
@@ -356,6 +429,8 @@ extension DictationController {
             // message; everything else keeps the generic label.
             if let ce = finalCloudError, ce.showsDedicatedMessage {
                 self.indicator.setStatus(.failed, message: ce.userMessage)
+            } else if self.settings.cloudModel == .localWhisperTurbo {
+                self.indicator.setStatus(.failed, message: Self.emptyRecognitionStatus)
             } else {
                 self.indicator.setStatus(.failed)
             }

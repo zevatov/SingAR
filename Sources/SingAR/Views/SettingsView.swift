@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var history = DictationHistory.shared
     @ObservedObject private var modelManager = ModelDownloadManager.shared
+    @ObservedObject private var updateChecker = UpdateChecker.shared
 
     @State private var googleApiKey = ""
     @State private var openrouterKey = ""
@@ -50,26 +51,65 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("SingAR")
                             .font(.system(size: 18, weight: .bold))
-                        Text("Голосовой ввод для разработчиков • Версия \(AppVersion.current)")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 6) {
+                            Text("Голосовой ввод для разработчиков • Версия \(AppVersion.current)")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+
+                            if case .updateAvailable(let version, _) = updateChecker.status {
+                                Button(action: {
+                                    updateChecker.openUpdateTarget()
+                                }) {
+                                    HStack(spacing: 3) {
+                                        Circle()
+                                            .fill(Color.orange)
+                                            .frame(width: 6, height: 6)
+                                        Text("Доступна \(version)")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundColor(.orange)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.12))
+                                    .cornerRadius(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
 
                     Spacer()
 
-                    Link(destination: URL(string: "https://github.com/zevatov/SingAR")!) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "curlybraces")
-                                .font(.system(size: 12))
-                            Text("GitHub")
-                                .font(.system(size: 11, weight: .medium))
+                    HStack(spacing: 8) {
+                        Link(destination: URL(string: "https://t.me/+fgfWiMVNgDdlMTYy")!) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color(red: 0.2, green: 0.65, blue: 0.95))
+                                Text("Telegram")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(6)
+                        .buttonStyle(.plain)
+
+                        Link(destination: URL(string: "https://github.com/zevatov/SingAR")!) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "curlybraces")
+                                    .font(.system(size: 12))
+                                Text("GitHub")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 // Section 0: System Permissions Alert (shown only when any permission is missing)
@@ -282,6 +322,12 @@ struct SettingsView: View {
 
                         Divider()
 
+                        Toggle("Звуковые сигналы при включении и выключении", isOn: $settings.playSoundEffects)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
+
+                        Divider()
+
                         VStack(alignment: .leading, spacing: 3) {
                             Toggle("Защита ввода: останавливать запись при смене окна", isOn: $settings.stopOnFocusLoss)
                                 .toggleStyle(.checkbox)
@@ -345,13 +391,30 @@ struct SettingsView: View {
                         Divider()
 
                         VStack(alignment: .leading, spacing: 3) {
-                            Toggle("Live-ввод: печатать слова прямо во время речи", isOn: $settings.livePartials)
+                            Toggle("Live-ввод: отображать слова прямо во время речи", isOn: $settings.livePartials)
                                 .toggleStyle(.checkbox)
                                 .font(.system(size: 12))
-                            Text("По умолчанию выключено: готовый чистовик мгновенно вставляется после отпускания клавиши без стираний.")
+                            Text("Отображает черновик речи в реальном времени. В режиме HUD поле редактора не трогается, чистовик вставляется мгновенно.")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                                 .padding(.leading, 18)
+
+                            if settings.livePartials {
+                                HStack(spacing: 8) {
+                                    Text("Режим:")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                    Picker("", selection: $settings.liveDraftMode) {
+                                        ForEach(LiveDraftDisplayMode.allCases, id: \.self) { mode in
+                                            Text(mode.title).tag(mode)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .font(.system(size: 11))
+                                }
+                                .padding(.leading, 18)
+                                .padding(.top, 4)
+                            }
                         }
                     }
                     .padding(14)
@@ -437,6 +500,7 @@ struct SettingsView: View {
             history.reload()
             checkPermissions()
             verifyCurrentKey()
+            updateChecker.checkForUpdates()
         }
         .onReceive(Timer.publish(every: 2.5, on: .main, in: .common).autoconnect()) { _ in
             checkPermissions()

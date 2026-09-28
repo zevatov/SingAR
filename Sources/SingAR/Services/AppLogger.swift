@@ -99,6 +99,21 @@ final class AppLogger {
         return "<len=\(text.count) hash=\(hash)>"
     }
 
+    /// One pipeline diagnostic line: `stage`, `error_code` and/or `action`, `reason`.
+    /// Callers must pass codes only — no dictation text, track titles, or secrets.
+    /// `log` still runs `sanitize` before NSLog and the file.
+    func logPipeline(stage: String, code: String? = nil, action: String? = nil, reason: String) {
+        var parts = ["stage=\(stage)"]
+        if let code, !code.isEmpty {
+            parts.append("error_code=\(code)")
+        }
+        if let action, !action.isEmpty {
+            parts.append("action=\(action)")
+        }
+        parts.append("reason=\(reason)")
+        log(parts.joined(separator: " "))
+    }
+
     // MARK: - Rotation & TTL
 
     /// Must be called on `queue`. Rotates the active file when it exceeds the

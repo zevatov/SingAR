@@ -82,13 +82,27 @@ enum CodeLexiconNormalizer {
         #"^[\s.,…\-_–—]+$"# // only dots/punctuation
     ]
 
+    /// Known end-credits / YouTube tail. The phrase itself, not a sentence boundary.
+    private static let trailingHallucinationBody = #"(?:субтитры(?:\s+(?:создавал|сделал|подготовил|добавил))?.*|dimatorzok.*|дима\s+торжок.*|редактор\s+субтитров.*|корректор.*|(?:перевод[а-я]*\s*:?\s*)?(?:елена\s+|ольга\s+)?вадимов[а-я]*.*|семкин.*|егоров[а-я]*.*|продолжение\s+следует.*|спасибо\s+за\s+просмотр.*|перевод[а-я]*\s+и\s+озвучк[а-я]*.*)"#
+
+    /// Legacy cut: credits only after `.` `!` `?` or a newline.
     private static let trailingHallucinationRegex = try! NSRegularExpression(
-        pattern: #"(?i)(?:[.!?\n]+\s*)(?:субтитры(?:\s+(?:создавал|сделал|подготовил|добавил))?.*|dimatorzok.*|дима\s+торжок.*|редактор\s+субтитров.*|корректор.*|(?:перевод[а-я]*\s*:?\s*)?(?:елена\s+|ольга\s+)?вадимов[а-я]*.*|семкин.*|егоров[а-я]*.*|продолжение\s+следует.*|спасибо\s+за\s+просмотр.*|перевод[а-я]*\s+и\s+озвучк[а-я]*.*)$"#,
+        pattern: "(?i)(?:[.!?\\n]+\\s*)\(trailingHallucinationBody)$",
         options: [.caseInsensitive]
     )
 
+    /// Same credits at the end of a phrase that has no terminator before them.
+    /// Requires a real prefix (`location > 0`), so a whole-line credit still
+    /// goes through `isHallucinationLine` and is wiped entirely.
+    private static let trailingHallucinationLooseRegex = try! NSRegularExpression(
+        pattern: "(?i)(?:^|[\\s])\(trailingHallucinationBody)$",
+        options: [.caseInsensitive]
+    )
+
+    /// Speech that mentions the credit phrase is not a tail: conjunction,
+    /// verb, quote, or colon immediately before it.
     private static let falsePositivePrefixRegex = try! NSRegularExpression(
-        pattern: #"(?i)\b(?:как|что|про|о|об|написал|сказал|выведи|сообщение|фильм|сериал|был|была|были|зовут)\s*[:"«']?\s*$"#,
+        pattern: #"(?i)(?:\b(?:как|что|про|о|об|написал|сказал|выведи|сообщение|фильм|сериал|был|была|были|зовут|и|или|а|но|чтобы|пусть)|[:"«'])\s*$"#,
         options: [.caseInsensitive]
     )
 
@@ -129,21 +143,22 @@ enum CodeLexiconNormalizer {
             trimmed = replaced.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        // 3. Trailing subtitle/credits trimming strictly after a sentence terminator (. ! ? \n)
+        // 3. Trailing credits: after a terminator, or bare at the end of the
+        // phrase. A conjunction / verb / quote / colon before the phrase keeps it.
         let fullRange = NSRange(trimmed.startIndex..., in: trimmed)
-        if let match = trailingHallucinationRegex.firstMatch(in: trimmed, options: [], range: fullRange) {
+        if let match = trailingHallucinationRegex.firstMatch(in: trimmed, options: [], range: fullRange)
+            ?? trailingHallucinationLooseRegex.firstMatch(in: trimmed, options: [], range: fullRange) {
             let matchRange = match.range
             if matchRange.location > 0 {
                 let nsTrimmed = trimmed as NSString
                 let prefix = nsTrimmed.substring(to: matchRange.location)
                 let prefixTrimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // Check false positive guard
                 let prefixNs = prefixTrimmed as NSString
                 let checkRange = NSRange(location: 0, length: prefixNs.length)
                 let isProtected = falsePositivePrefixRegex.firstMatch(in: prefixTrimmed, options: [], range: checkRange) != nil
 
-                if !isProtected {
+                if !isProtected && !prefixTrimmed.isEmpty {
                     var cleanedPrefix = prefixTrimmed
                     if !cleanedPrefix.hasSuffix(".") && !cleanedPrefix.hasSuffix("!") && !cleanedPrefix.hasSuffix("?") && !cleanedPrefix.hasSuffix(";") {
                         cleanedPrefix += "."

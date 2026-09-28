@@ -33,6 +33,15 @@ extension DictationController {
         let cleaned = processed(newText)
         guard !cleaned.isEmpty, cleaned != lastLiveText else { return }
 
+        // Zero-Scratch Mode: show live transcription preview only in HUD capsule,
+        // leaving the editor field completely clean (0 backspaces, 0 latency at finish).
+        if settings.liveDraftMode == .hudOnly {
+            lastLiveText = cleaned
+            let preview = cleaned.count > 30 ? "…" + String(cleaned.suffix(28)) : cleaned
+            indicator.setStatus(.listening, message: preview)
+            return
+        }
+
         // Compute common prefix to minimize backspaces
         let oldChars = Array(lastLiveText)
         let newChars = Array(cleaned)

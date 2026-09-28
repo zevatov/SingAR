@@ -59,3 +59,8 @@ scratch/
 HANDOFF*
 docs/local-*
 
+
+# Internal audit reports and private prompts
+docs/AUDIT_REPORT_2.3.1.md
+docs/LOCAL_PROMPT_ZOO_CODE.md
+docs/SYSTEM_PROMPT_ZOO_CODE.md

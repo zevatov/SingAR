@@ -85,8 +85,8 @@ final class FocusGuardAndClipboardTests: XCTestCase {
         XCTAssertEqual(AppStatus.failed.color, .systemRed)
     }
 
-    func testAppVersionMatches225() {
-        XCTAssertEqual(AppVersion.current, "2.2.5")
+    func testAppVersionMatchesCurrent() {
+        XCTAssertEqual(AppVersion.current, "2.3.1")
     }
 
     func testVADInitialSilenceState() {

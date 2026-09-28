@@ -21,6 +21,8 @@ enum CloudASRError: Error, Equatable {
     case emptySpeech
     /// Key not configured at all (SecretStore miss) — non-network.
     case missingKey
+    /// Whisper model file not found on disk.
+    case missingModel
 
     /// Short user-facing message sized for the 180pt status capsule.
     var userMessage: String {
@@ -33,6 +35,7 @@ enum CloudASRError: Error, Equatable {
         case .cancelled:           return "Отменено"
         case .emptySpeech:         return "Речь не распознана"
         case .missingKey:          return "Ключ не задан"
+        case .missingModel:        return "Модель не загружена"
         }
     }
 
@@ -40,8 +43,38 @@ enum CloudASRError: Error, Equatable {
     /// everything else keeps the generic `.failed` state (behavior parity).
     var showsDedicatedMessage: Bool {
         switch self {
-        case .invalidKey, .rateLimited, .network: return true
+        case .invalidKey, .rateLimited, .network, .missingModel: return true
         default: return false
+        }
+    }
+
+    /// Stable pipeline code. Status digits only — never a response body or URL.
+    var logCode: String {
+        switch self {
+        case .invalidKey(let status): return "http_\(status)"
+        case .rateLimited: return "http_429"
+        case .serverError(let status): return "http_\(status)"
+        case .network(let underlying): return "network_\(underlying.code.rawValue)"
+        case .timeout: return "timeout"
+        case .cancelled: return "cancelled"
+        case .emptySpeech: return "empty_speech"
+        case .missingKey: return "missing_key"
+        case .missingModel: return "missing_model"
+        }
+    }
+
+    /// Short reason with the same constraint as `logCode` (no body, no user text).
+    var logReason: String {
+        switch self {
+        case .invalidKey: return "invalid_key"
+        case .rateLimited: return "rate_limited"
+        case .serverError: return "server_error"
+        case .network(let underlying): return "url_error_\(underlying.code.rawValue)"
+        case .timeout: return "request_timeout"
+        case .cancelled: return "cancelled"
+        case .emptySpeech: return "empty_result"
+        case .missingKey: return "api_key_missing"
+        case .missingModel: return "model_not_installed"
         }
     }
 }

@@ -98,6 +98,26 @@ extension DictationController {
         }
     }
 
+    /// Stable start-refusal code for the pipeline log. AX denial wins, then
+    /// secure input, then a self-frontmost window; every other fail-closed
+    /// denial stays `focus_unverifiable`. No user content.
+    nonisolated static func startRefusalErrorCode(
+        reason: StartRefusalReason,
+        processTrusted: Bool,
+        secureInput: Bool
+    ) -> String {
+        if reason == .axDenied || !processTrusted { return "ax_unavailable" }
+        if secureInput { return "secure_input" }
+        switch reason {
+        case .axDenied:
+            return "ax_unavailable"
+        case .selfFrontmost:
+            return "self_frontmost"
+        case .focusOrSecureInput:
+            return "focus_unverifiable"
+        }
+    }
+
     /// FIX-B2: content-free diagnostic line after a refused capture.
     /// Logs AX role + settable flag only — never value/title/document text.
     nonisolated static func refusalDiagnosticsLog(role: String?, settable: Bool?) -> String {
@@ -115,5 +135,33 @@ extension DictationController {
     /// visible feedback; a successful capture must never show refusal UI.
     nonisolated static func showsRefusalFeedback(captureSucceeded: Bool) -> Bool {
         !captureSucceeded
+    }
+
+    /// Status shown in the capsule when Whisper returned nothing usable and
+    /// there is no live/local text to keep. Status only — never a draft.
+    nonisolated static let emptyRecognitionStatus = "Ничего не распознано"
+
+    /// Status shown next to an inserted transcript when polish timed out or
+    /// the polish service failed. The raw text is what gets inserted.
+    nonisolated static let unpolishedInsertStatus = "Текст без правки"
+
+    /// Whisper empty/error must not wipe a non-empty live draft or local
+    /// transcript. Whitespace-only values count as empty. A still-empty result
+    /// is not inserted; the caller surfaces `emptyRecognitionStatus`.
+    nonisolated static func whisperFallbackText(liveOrLocal: String, cloudText: String) -> String {
+        let cloud = cloudText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cloud.isEmpty { return cloud }
+        return liveOrLocal.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Polish failures that keep the raw transcript and must say so in the
+    /// capsule. Other polish errors keep their existing dedicated messages.
+    nonisolated static func polishNeedsUnpolishedStatus(_ error: CloudASRError?) -> Bool {
+        switch error {
+        case .timeout?, .serverError?:
+            return true
+        default:
+            return false
+        }
     }
 }

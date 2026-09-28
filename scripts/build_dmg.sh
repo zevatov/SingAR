@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds SingAR.app (Release) and packages it into a drag-and-drop DMG
-# at the repo root (e.g. "SingAR 2.2.4.dmg").
+# at the repo root ("SingAR.dmg").
 #
 # GitHub ad-hoc distribution path (conscious decision, no Developer ID / notarization
 # per owner condition):
@@ -14,8 +14,7 @@
 #
 # Single source of truth for version: Sources/SingAR/Config/AppVersion.swift
 #   (`static let current`). No hardcoded fallback — script FAILS if version is missing.
-#   CFBundleShortVersionString / CFBundleVersion / DMG_PATH / DMG_TITLE are all
-#   derived from that single VERSION variable.
+#   CFBundleShortVersionString / CFBundleVersion are derived from that single VERSION variable.
 #
 # Usage:
 #   ./scripts/build_dmg.sh [--dry-run] [--require-tag] [--help]
@@ -60,9 +59,9 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 echo "==> Version source: AppVersion.current = $VERSION (single source of truth)"
 
-APP_BUNDLE_NAME="SingAR $VERSION.app"
-DMG_TITLE="SingAR $VERSION"
-DMG_PATH="$ROOT/SingAR $VERSION.dmg"
+APP_BUNDLE_NAME="SingAR.app"
+DMG_TITLE="SingAR"
+DMG_PATH="$ROOT/SingAR.dmg"
 SHA_PATH="$DMG_PATH.sha256"
 BUILD_DIR="$ROOT/build"
 APP_PATH="$BUILD_DIR/$APP_BUNDLE_NAME"
@@ -116,6 +115,10 @@ mkdir -p "$APP_PATH/Contents/Resources"
 cp "$RELEASE_BIN" "$APP_PATH/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP_PATH/Contents/MacOS/$BIN_NAME"
 
+if [ -f "$ROOT/scripts/dmg_assets/icon.icns" ]; then
+    cp "$ROOT/scripts/dmg_assets/icon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
+fi
+
 # Create Info.plist with interpolated version (single source: $VERSION)
 cat << EOF > "$APP_PATH/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,9 +134,11 @@ cat << EOF > "$APP_PATH/Contents/Info.plist"
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>SingAR $VERSION</string>
+    <string>SingAR</string>
     <key>CFBundleDisplayName</key>
-    <string>SingAR $VERSION</string>
+    <string>SingAR</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -173,10 +178,6 @@ spctl -a -t exec -vv "$APP_PATH" || echo "INFO: spctl rejected as expected for a
 echo "==> App size:"
 du -sh "$APP_PATH"
 
-echo "==> Staging drag-and-drop folder in ${TEMP_STAGING}..."
-cp -R "$APP_PATH" "${TEMP_STAGING}/"
-ln -s /Applications "${TEMP_STAGING}/Applications"
-
 # --- Preserve previous DMG for rollback ---
 if [ -f "$DMG_PATH" ]; then
     PREV_DMG="${DMG_PATH%.dmg}.prev.dmg"
@@ -187,11 +188,34 @@ if [ -f "$DMG_PATH" ]; then
     fi
 fi
 
-echo "==> Creating DMG: $DMG_PATH..."
-hdiutil create -volname "$DMG_TITLE" \
-    -srcfolder "${TEMP_STAGING}" \
-    -ov -format UDZO \
-    "$DMG_PATH"
+DMGBUILD_BIN=""
+if [ -x "/opt/anaconda3/bin/dmgbuild" ]; then
+    DMGBUILD_BIN="/opt/anaconda3/bin/dmgbuild"
+elif command -v dmgbuild >/dev/null 2>&1; then
+    DMGBUILD_BIN=$(command -v dmgbuild)
+fi
+
+if [ -n "$DMGBUILD_BIN" ] && [ -f "$ROOT/dmg_settings.py" ] && [ -f "$ROOT/dmg_background.png" ]; then
+    echo "==> Creating styled DMG via dmgbuild ($DMGBUILD_BIN)..."
+    "$DMGBUILD_BIN" -s "$ROOT/dmg_settings.py" \
+        -D app="$APP_PATH" \
+        -D background="$ROOT/dmg_background.png" \
+        -D icon="$ROOT/scripts/dmg_assets/icon.icns" \
+        "$DMG_TITLE" "$DMG_PATH"
+else
+    echo "==> Creating fallback DMG via hdiutil..."
+    cp -R "$APP_PATH" "${TEMP_STAGING}/"
+    ln -s /Applications "${TEMP_STAGING}/Applications"
+    hdiutil create -volname "$DMG_TITLE" \
+        -srcfolder "${TEMP_STAGING}" \
+        -ov -format UDZO \
+        "$DMG_PATH"
+fi
+
+if [ -f "$ROOT/scripts/set_dmg_icon.swift" ] && [ -f "$ROOT/scripts/dmg_assets/app_icon.png" ]; then
+    echo "==> Setting custom icon on DMG file..."
+    swift "$ROOT/scripts/set_dmg_icon.swift" "$DMG_PATH" "$ROOT/scripts/dmg_assets/app_icon.png" || true
+fi
 
 echo "==> Generating SHA256 checksum next to artifact..."
 shasum -a 256 "$DMG_PATH" | tee "$SHA_PATH"

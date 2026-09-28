@@ -69,6 +69,11 @@ final class VoiceActivityDetector {
     private var silenceAccumulator: TimeInterval = 0
     private var hangoverRemaining: TimeInterval = 0
     private var bufferCount = 0
+    /// PCM frames seen since `reset()`. Diagnostic only — not an input to
+    /// `hasSpoken` or the silence threshold.
+    private var capturedFrameCount = 0
+    /// PCM frames whose buffer RMS was at or above `silenceThreshold`.
+    private var speechFrameCount = 0
     /// Этап 2: once-per-segment end-of-speech. Set on speech, consumed on the
     /// first silence-threshold crossing — a 5 s pause fires exactly once, not
     /// every 0.6 s. Cleared by speech or `reset()`.
@@ -80,6 +85,11 @@ final class VoiceActivityDetector {
         return body()
     }
 
+    /// Read-only diagnostic snapshot. The silence decision does not read these.
+    var diagnosticCapturedFrames: Int { withLock { capturedFrameCount } }
+    var diagnosticSpeechFrames: Int { withLock { speechFrameCount } }
+    var diagnosticSilenceThreshold: Float { silenceThreshold }
+
     func reset() {
         withLock {
             _isSpeaking = false
@@ -88,8 +98,30 @@ final class VoiceActivityDetector {
             hangoverRemaining = 0
             _graceRemaining = 0
             bufferCount = 0
+            capturedFrameCount = 0
+            speechFrameCount = 0
             endOfSpeechFired = false
         }
+    }
+
+    /// Final (or checkpoint) line for the no_speech investigation.
+    /// Does not change thresholds or whether the session counts as speech.
+    func logSessionDiagnostic() {
+        let frames: Int
+        let speech: Int
+        let threshold: Float
+        (frames, speech, threshold) = withLock {
+            (capturedFrameCount, speechFrameCount, silenceThreshold)
+        }
+        Self.emitDiagnostic(frames: frames, speech: speech, threshold: threshold)
+    }
+
+    private static func emitDiagnostic(frames: Int, speech: Int, threshold: Float) {
+        AppLogger.shared.logPipeline(
+            stage: "vad",
+            code: "diagnostic",
+            reason: "frames=\(frames) speech=\(speech) threshold=\(String(format: "%.3f", threshold))"
+        )
     }
 
     func feed(_ buffer: AVAudioPCMBuffer) {
@@ -118,9 +150,23 @@ final class VoiceActivityDetector {
         var fireLevel = false
         var fireEndOfSpeech = false
         var logLine: String?
+        var logDiagnostic = false
+        var diagnosticFrames = 0
+        var diagnosticSpeech = 0
+        var diagnosticThreshold: Float = 0
         withLock {
             bufferCount += 1
             let count = bufferCount
+            capturedFrameCount += frames
+            if rms >= silenceThreshold {
+                speechFrameCount += frames
+            }
+            if count == 1 || count % 20 == 0 {
+                logDiagnostic = true
+                diagnosticFrames = capturedFrameCount
+                diagnosticSpeech = speechFrameCount
+                diagnosticThreshold = silenceThreshold
+            }
             let speakingBefore = _isSpeaking
             if rms >= silenceThreshold {
                 _hasSpoken = true
@@ -177,6 +223,9 @@ final class VoiceActivityDetector {
 
         if let logLine {
             NSLog("%@", logLine)
+        }
+        if logDiagnostic {
+            Self.emitDiagnostic(frames: diagnosticFrames, speech: diagnosticSpeech, threshold: diagnosticThreshold)
         }
         // Callbacks outside the lock, on the caller's (tap) thread.
         if fireLevel {

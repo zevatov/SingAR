@@ -61,14 +61,18 @@ extension DictationController {
             NSLog("[SingAR] no AX-verifiable editable target — not starting dictation")
             // FIX-B1: the refusal cause goes to singar.log too (AppLogger
             // itself mirrors into NSLog). Content-free: status only.
-            switch Self.refusalReason(axStatus: axStatus, selfIsFrontmost: selfIsFrontmost) {
-            case .axDenied:
-                AppLogger.shared.log("capture refused: axUnavailable")
-            case .selfFrontmost:
-                AppLogger.shared.log("capture refused: selfFrontmost")
-            case .focusOrSecureInput:
-                AppLogger.shared.log("capture refused: focus/secureInput")
-            }
+            let refusal = Self.refusalReason(axStatus: axStatus, selfIsFrontmost: selfIsFrontmost)
+            let refusalCode = Self.startRefusalErrorCode(
+                reason: refusal,
+                processTrusted: AXIsProcessTrusted(),
+                secureInput: LiveAXFocusProbe().isSecureEventInput()
+            )
+            AppLogger.shared.logPipeline(
+                stage: "start",
+                code: refusalCode,
+                action: "capture_refused",
+                reason: refusalCode
+            )
             // FIX-B2: second readFocusedFacts is log-only (not a capture).
             // Self-frontmost already returns nil from the live probe.
             // Never log value / window title / document text.
@@ -162,8 +166,12 @@ extension DictationController {
             }
         }
 
-        // Initialize engines
-        localAsr = SpeechEngine()
+        // Initialize engines: Apple Speech runs ONLY when user explicitly chose localOnly
+        if settings.cloudModel == .localOnly {
+            localAsr = SpeechEngine()
+        } else {
+            localAsr = NoopASREngine()
+        }
         if feedsEngines && settings.cloudModel == .gemini35Transcribe && cloud.available {
             geminiAsr = GeminiLiveEngine()
         } else {
@@ -339,9 +347,13 @@ extension DictationController {
         let duration = Int(Date().timeIntervalSince(startedAt) * 1_000)
         let statusStr = completed ? "completed" : "started"
         if let errorCode {
-            NSLog("[SingAR] stage=\(stage) status=\(statusStr) duration_ms=\(duration) error_code=\(errorCode)")
+            AppLogger.shared.logPipeline(
+                stage: stage,
+                code: errorCode,
+                reason: "status=\(statusStr) duration_ms=\(duration)"
+            )
         } else {
-            NSLog("[SingAR] stage=\(stage) status=\(statusStr) duration_ms=\(duration)")
+            AppLogger.shared.log("stage=\(stage) status=\(statusStr) duration_ms=\(duration)")
         }
     }
 }

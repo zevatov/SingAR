@@ -113,5 +113,22 @@ final class VoiceActivityDetectorTests: XCTestCase {
         XCTAssertFalse(vad.hasSpoken)
         XCTAssertFalse(vad.isSpeaking)
         XCTAssertFalse(vad.isFeeding)
+        XCTAssertEqual(vad.diagnosticCapturedFrames, 0)
+        XCTAssertEqual(vad.diagnosticSpeechFrames, 0)
+    }
+
+    func testDiagnosticCountsSpeechFramesWithoutChangingThreshold() {
+        let vad = VoiceActivityDetector()
+        XCTAssertEqual(vad.diagnosticSilenceThreshold, 0.012, accuracy: 0.000_001)
+        let frames = Int(framesPerBuffer)
+        vad.feed(loudBuffer())
+        XCTAssertEqual(vad.diagnosticCapturedFrames, frames)
+        XCTAssertEqual(vad.diagnosticSpeechFrames, frames)
+        XCTAssertTrue(vad.hasSpoken)
+        vad.feed(silenceBuffer())
+        XCTAssertEqual(vad.diagnosticCapturedFrames, frames * 2)
+        XCTAssertEqual(vad.diagnosticSpeechFrames, frames)
+        XCTAssertEqual(vad.diagnosticSilenceThreshold, 0.012, accuracy: 0.000_001)
+        XCTAssertTrue(vad.hasSpoken)
     }
 }

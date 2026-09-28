@@ -43,7 +43,7 @@ final class DictationController {
     let media = MediaController()
     let commands = VoiceCommandParser()
 
-    var localAsr = SpeechEngine()
+    var localAsr: ASREngine = NoopASREngine()
     var geminiAsr: GeminiLiveEngine?
     let cloud = CloudASR()
     let indicator = DictationIndicator()

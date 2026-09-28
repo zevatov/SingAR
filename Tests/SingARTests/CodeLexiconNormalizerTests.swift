@@ -58,6 +58,22 @@ final class CodeLexiconNormalizerTests: XCTestCase {
 
     func testTrailingHallucinationsStripped() {
         XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Сделай кнопку. Продолжение следует"),
+            "Сделай кнопку."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Сделай кнопку Продолжение следует"),
+            "Сделай кнопку."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Сделай кнопку.\nСубтитры создавал DimaTorzok"),
+            "Сделай кнопку."
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Сделай кнопку Субтитры создавал DimaTorzok"),
+            "Сделай кнопку."
+        )
+        XCTAssertEqual(
             CodeLexiconNormalizer.normalize("Создай кнопку и добавь обработчик клика. Субтитры создавал DimaTorzok"),
             "Создай кнопку и добавь обработчик клика."
         )
@@ -77,6 +93,14 @@ final class CodeLexiconNormalizerTests: XCTestCase {
 
     func testFalsePositiveHallucinationsProtected() {
         // Legitimate user speech must NOT be stripped when preceded by conjunctions or verbs
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("Напиши: продолжение следует"),
+            "Напиши: продолжение следует"
+        )
+        XCTAssertEqual(
+            CodeLexiconNormalizer.normalize("сказал что продолжение следует"),
+            "сказал что продолжение следует"
+        )
         XCTAssertEqual(
             CodeLexiconNormalizer.normalize("Напиши историю о том, как субтитры создавал Дима Торжок"),
             "Напиши историю о том, как субтитры создавал Дима Торжок"

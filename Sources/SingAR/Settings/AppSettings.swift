@@ -67,6 +67,18 @@ enum ASRLanguage: String, CaseIterable, MenuTitled {
     }
 }
 
+enum LiveDraftDisplayMode: String, CaseIterable, MenuTitled {
+    case hudOnly        // Режим без мусора: черновик в HUD, редактор чист, чистовик за 1 мс
+    case inlineTyping   // Классический: посимвольный ввод в текстовое поле
+
+    var title: String {
+        switch self {
+        case .hudOnly: return "Чистый ввод в HUD (рекоменд. — 0 задержек)"
+        case .inlineTyping: return "Посимвольный ввод в текстовое поле"
+        }
+    }
+}
+
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
@@ -79,6 +91,8 @@ final class AppSettings: ObservableObject {
         static let autoPunctuation = "autoPunctuation"
         static let voiceCommands   = "voiceCommands"
         static let livePartials    = "livePartials"
+        static let liveDraftMode   = "liveDraftMode"
+        static let playSoundEffects = "playSoundEffects"
         static let pauseMedia      = "pauseMedia"
         static let cloudCleanup    = "cloudCleanup"
         static let cloudModel      = "cloudModel"
@@ -101,6 +115,9 @@ final class AppSettings: ObservableObject {
     }
     @Published var livePartials: Bool {
         didSet { defaults.set(livePartials, forKey: Key.livePartials) }
+    }
+    @Published var playSoundEffects: Bool {
+        didSet { defaults.set(playSoundEffects, forKey: Key.playSoundEffects) }
     }
     @Published var pauseMedia: Bool {
         didSet { defaults.set(pauseMedia, forKey: Key.pauseMedia) }
@@ -132,6 +149,9 @@ final class AppSettings: ObservableObject {
     @Published var language: ASRLanguage {
         didSet { defaults.set(language.rawValue, forKey: Key.language) }
     }
+    @Published var liveDraftMode: LiveDraftDisplayMode {
+        didSet { defaults.set(liveDraftMode.rawValue, forKey: Key.liveDraftMode) }
+    }
 
     private init() {
         defaults.register(defaults: [
@@ -141,6 +161,8 @@ final class AppSettings: ObservableObject {
             Key.autoPunctuation: true,
             Key.voiceCommands:   true,
             Key.livePartials:    false,
+            Key.liveDraftMode:   LiveDraftDisplayMode.hudOnly.rawValue,
+            Key.playSoundEffects: true,
             Key.pauseMedia:      true,
             Key.cloudCleanup:    true,
             Key.cloudModel:      CloudModel.gemini35Transcribe.rawValue,
@@ -154,6 +176,7 @@ final class AppSettings: ObservableObject {
         self.autoPunctuation = defaults.bool(forKey: Key.autoPunctuation)
         self.voiceCommands = defaults.bool(forKey: Key.voiceCommands)
         self.livePartials = defaults.bool(forKey: Key.livePartials)
+        self.playSoundEffects = defaults.object(forKey: Key.playSoundEffects) as? Bool ?? true
         self.pauseMedia = defaults.bool(forKey: Key.pauseMedia)
         self.launchAtLogin = defaults.bool(forKey: Key.launchAtLogin)
         self.stopOnFocusLoss = defaults.object(forKey: Key.stopOnFocusLoss) as? Bool ?? true
@@ -164,6 +187,7 @@ final class AppSettings: ObservableObject {
         self.hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption
         self.cloudModel = CloudModel(rawValue: defaults.string(forKey: Key.cloudModel) ?? "") ?? .gemini35Transcribe
         self.language = ASRLanguage(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .auto
+        self.liveDraftMode = LiveDraftDisplayMode(rawValue: defaults.string(forKey: Key.liveDraftMode) ?? "") ?? .hudOnly
     }
 
 }

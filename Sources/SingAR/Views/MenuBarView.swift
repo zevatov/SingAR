@@ -70,8 +70,22 @@ struct MenuBarView: View {
 
                 Spacer()
 
-                // Top-Right Control Buttons (Play/Pause + Power)
+                // Top-Right Control Buttons (Play/Pause + Mute/Unmute + Power)
                 HStack(spacing: 6) {
+                    // Mute / Unmute Sounds Button
+                    Button {
+                        settings.playSoundEffects.toggle()
+                    } label: {
+                        Image(systemName: settings.playSoundEffects ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(settings.playSoundEffects ? Color.brandAccent : Color.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(Color.brandCard)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(settings.playSoundEffects ? "Звуковые сигналы включены (клик чтобы отключить)" : "Звуковые сигналы отключены (клик чтобы включить)")
+
                     // Play / Pause Button
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -100,7 +114,7 @@ struct MenuBarView: View {
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .help("Выйти из SingAR")
+                    .help("Завершить SingAR")
                 }
             }
 

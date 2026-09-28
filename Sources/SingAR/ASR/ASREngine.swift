@@ -20,6 +20,13 @@ protocol ASREngine {
     func cancel()
 }
 
+/// A no-op ASR engine used when streaming recognition is disabled or handled by another engine.
+final class NoopASREngine: ASREngine {
+    func feed(_ buffer: AVAudioPCMBuffer, onPartial: @escaping (String) -> Void) {}
+    func finalize() async -> String { "" }
+    func cancel() {}
+}
+
 /// Local ASR via Apple's `SFSpeechRecognizer` — on-device speech recognition
 /// that streams partial results natively (0ms latency, free, offline, private).
 final class SpeechEngine: ASREngine {
@@ -284,8 +291,9 @@ final class CloudASR {
     func cloudTranscribeResult(audio: Data) async -> Result<String, CloudASRError> {
         switch settings.cloudModel {
         case .localWhisperTurbo:
-            // Local whisper keeps its existing diagnostics; it cannot produce
-            // the cloud HTTP error taxonomy, so failures map to `.emptySpeech`.
+            guard ModelDownloadManager.shared.isModelInstalled else {
+                return .failure(.missingModel)
+            }
             let text = await transcribeWithLocalWhisper(audio: audio)
             if let text, !text.isEmpty { return .success(text) }
             return .failure(.emptySpeech)
@@ -392,16 +400,50 @@ final class CloudASR {
         var req = SecretStore.geminiRequest(url: url, apiKey: apiKey)
         req.httpMethod = "POST"
         req.httpBody = body
-        req.timeoutInterval = 6
+        req.timeoutInterval = 4
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // At most one extra send (timeout, dropped connection, or HTTP 503).
+        // The caller keeps the raw transcript; this path never loops.
+        return await polishRequest(req, allowRetry: true)
+    }
+
+    private func polishRequest(_ req: URLRequest, allowRetry: Bool) async -> Result<String, CloudASRError> {
         do {
             let (data, response) = try await cancellableData(for: req)
-            guard let http = response as? HTTPURLResponse else { return .failure(.emptySpeech) }
+            guard let http = response as? HTTPURLResponse else {
+                AppLogger.shared.logPipeline(
+                    stage: "polish",
+                    code: "no_http_response",
+                    action: "request_failed",
+                    reason: "response_not_http"
+                )
+                return .failure(.emptySpeech)
+            }
             guard http.statusCode == 200 else {
                 // Gate 2.5: single typed mapping for non-200 statuses.
+                // Status code only — never the response body.
                 let typed = CloudASRError.from(status: http.statusCode)
-                NSLog("[SingAR] ⚠️ polish: HTTP %d → %@", http.statusCode, String(describing: typed))
+                if Self.polishShouldRetry(error: typed, allowRetry: allowRetry) {
+                    AppLogger.shared.logPipeline(
+                        stage: "polish",
+                        code: typed.logCode,
+                        action: "retry_once",
+                        reason: "status=503"
+                    )
+                    do {
+                        try await Task.sleep(nanoseconds: 500_000_000)
+                    } catch {
+                        return .failure(.cancelled)
+                    }
+                    return await polishRequest(req, allowRetry: false)
+                }
+                AppLogger.shared.logPipeline(
+                    stage: "polish",
+                    code: typed.logCode,
+                    action: "http_error",
+                    reason: typed.logReason
+                )
                 return .failure(typed)
             }
 
@@ -412,13 +454,60 @@ final class CloudASR {
                   let parts = content["parts"] as? [[String: Any]],
                   let firstPart = parts.first,
                   let polishedText = firstPart["text"] as? String else {
+                AppLogger.shared.logPipeline(
+                    stage: "polish",
+                    code: "empty_speech",
+                    action: "request_failed",
+                    reason: "response_unusable"
+                )
                 return .failure(.emptySpeech)
             }
 
             let trimmed = polishedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? .failure(.emptySpeech) : .success(trimmed)
+            if trimmed.isEmpty {
+                AppLogger.shared.logPipeline(
+                    stage: "polish",
+                    code: "empty_speech",
+                    action: "request_failed",
+                    reason: "empty_result"
+                )
+                return .failure(.emptySpeech)
+            }
+            return .success(trimmed)
         } catch {
-            return .failure(CloudASRError.from(error))
+            let typed = CloudASRError.from(error)
+            if Self.polishShouldRetry(error: typed, allowRetry: allowRetry) {
+                AppLogger.shared.logPipeline(
+                    stage: "polish",
+                    code: typed.logCode,
+                    action: "retry_once",
+                    reason: typed.logReason
+                )
+                return await polishRequest(req, allowRetry: false)
+            }
+            AppLogger.shared.logPipeline(
+                stage: "polish",
+                code: typed.logCode,
+                action: "request_failed",
+                reason: typed.logReason
+            )
+            return .failure(typed)
+        }
+    }
+
+    /// One extra send, and only while `allowRetry` is still true.
+    /// Transport failures (timeout, dropped connection) and HTTP 503 qualify.
+    /// 401, 429 and every other HTTP status do not. The repeat calls back with
+    /// `allowRetry: false`, so a timeout followed by 503 cannot send a third time.
+    static func polishShouldRetry(error: CloudASRError, allowRetry: Bool) -> Bool {
+        guard allowRetry else { return false }
+        switch error {
+        case .timeout, .network:
+            return true
+        case .serverError(let status):
+            return status == 503
+        default:
+            return false
         }
     }
 
@@ -431,7 +520,12 @@ final class CloudASR {
 
     private func transcribeWithLocalWhisper(audio: Data) async -> String? {
         guard let modelPath = ModelDownloadManager.shared.activeModelPath else {
-            NSLog("[SingAR] ❌ localWhisper: model not found")
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: "missing_model",
+                action: "model_failed",
+                reason: "model_path_nil"
+            )
             return nil
         }
 
@@ -443,7 +537,12 @@ final class CloudASR {
         ].compactMap { $0 }
 
         guard let whisperBin = possibleBins.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            NSLog("[SingAR] ❌ localWhisper: whisper-cli binary not found in standard paths")
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: "binary_missing",
+                action: "model_failed",
+                reason: "whisper_cli_not_found"
+            )
             return nil
         }
 
@@ -451,7 +550,12 @@ final class CloudASR {
         do {
             try audio.write(to: tmpWav)
         } catch {
-            NSLog("[SingAR] ❌ localWhisper: failed to write tmp WAV: \(error)")
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: "wav_write_failed",
+                action: "model_failed",
+                reason: AppLogger.sanitizedError(error)
+            )
             return nil
         }
         defer { try? FileManager.default.removeItem(at: tmpWav) }
@@ -480,7 +584,12 @@ final class CloudASR {
         do {
             try process.run()
         } catch {
-            AppLogger.shared.log("❌ localWhisper: failed to launch whisper-cli: \(error)")
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: "launch_failed",
+                action: "model_failed",
+                reason: AppLogger.sanitizedError(error)
+            )
             return nil
         }
 
@@ -507,10 +616,14 @@ final class CloudASR {
         }
 
         if timedOut {
-            let reason = Task.isCancelled
-                ? "dictation task cancelled"
-                : "timeout after \(Int(Self.whisperProcessTimeout))s"
-            AppLogger.shared.log("⚠️ localWhisper: \(reason) — terminating whisper-cli (pid \(process.processIdentifier))")
+            let cancelled = Task.isCancelled
+            let reason = cancelled ? "task_cancelled" : "timeout_\(Int(Self.whisperProcessTimeout))s"
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: cancelled ? "cancelled" : "timeout",
+                action: "terminate",
+                reason: reason
+            )
             if process.isRunning {
                 process.terminate()
                 // Short grace period, then force-kill so the subprocess can
@@ -526,7 +639,6 @@ final class CloudASR {
                     _ = kill(process.processIdentifier, SIGKILL)
                 }
             }
-            AppLogger.shared.log("❌ localWhisper aborted (\(reason)) — falling back to live/local text")
             return nil
         }
 
@@ -537,7 +649,12 @@ final class CloudASR {
 
         guard exitCode == 0 else {
             let stderrText = String(data: await stderrTask.value ?? Data(), encoding: .utf8) ?? ""
-            AppLogger.shared.log("❌ localWhisper: non-zero termination \(exitCode) (\(elapsed)ms) stderrLen=\(stderrText.count) — falling back to live/local text")
+            AppLogger.shared.logPipeline(
+                stage: "whisper",
+                code: "exit_\(exitCode)",
+                action: "model_failed",
+                reason: "stderr_len=\(stderrText.count) elapsed_ms=\(elapsed)"
+            )
             return nil
         }
 
@@ -560,10 +677,24 @@ final class CloudASR {
             // Gate 2.3: same lexicon normalization as every other engine —
             // also strips YouTube hallucination lines.
             let normalized = CodeLexiconNormalizer.normalize(rawResult)
+            if normalized.isEmpty {
+                AppLogger.shared.logPipeline(
+                    stage: "whisper",
+                    code: "hallucination_only",
+                    action: "empty_result",
+                    reason: "normalized_empty raw_len=\(rawResult.count) elapsed_ms=\(elapsed)"
+                )
+                return nil
+            }
             AppLogger.shared.log("✅ localWhisper: ok (\(elapsed)ms, rawLen=\(rawResult.count), outLen=\(normalized.count))")
-            return normalized.isEmpty ? nil : normalized
+            return normalized
         }
-        AppLogger.shared.log("⚠️ localWhisper: empty output (\(elapsed)ms)")
+        AppLogger.shared.logPipeline(
+            stage: "whisper",
+            code: "empty_output",
+            action: "empty_result",
+            reason: "elapsed_ms=\(elapsed)"
+        )
         return nil
     }
 

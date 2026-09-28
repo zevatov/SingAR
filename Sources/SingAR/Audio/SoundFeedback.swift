@@ -14,11 +14,13 @@ enum SoundFeedback {
 
     /// Play on dictation start.
     static func start() {
+        guard AppSettings.shared.playSoundEffects else { return }
         NSSound(named: "Tink")?.play()
     }
 
     /// Play on dictation stop / cancel.
     static func stop() {
+        guard AppSettings.shared.playSoundEffects else { return }
         NSSound(named: "Glass")?.play()
     }
 }

@@ -17,9 +17,13 @@ final class MediaController {
         "kMRMediaRemoteCommandTogglePlayPause": 2,
     ]
 
-    private var didSendMediaRemotePause = false
-    private var didPauseAppleMusic = false
-    private var didPauseSpotify = false
+    /// Sources this session actually paused. `nil` until a pause plan is
+    /// stored; resume of a nil plan sends no Play (media that was already
+    /// paused before dictation must stay paused).
+    private var pausedPlan: MediaPlaybackRouting.PausePlan?
+    /// Bumped when a resume is consumed or a newer pause replaces it, so a
+    /// late confirmation cannot send a second Play into a finished session.
+    private var resumeEpoch = 0
 
     init() {
         handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW)
@@ -31,35 +35,50 @@ final class MediaController {
 
     // MARK: - Playback Detection
 
+    /// Which probe reported playback. Names only — never a track title.
+    enum PlaybackDetector: String {
+        case coreAudio = "CoreAudio"
+        case mediaRemote = "MediaRemote"
+        case music = "Music"
+        case spotify = "Spotify"
+        case iokitVideo = "IOKitVideo"
+        case none = "none"
+    }
+
     /// Synchronous multi-layer check if ANY media (Spotify, Yandex Music, YouTube/Browser, Music.app)
     /// is actively outputting sound or video right now.
     func isAnyMediaPlaying() -> Bool {
+        playingDetector() != .none
+    }
+
+    /// First probe that reports playback, in the same order as the pause decision.
+    func playingDetector() -> PlaybackDetector {
         // Layer 1: CoreAudio active output stream check (Yandex Music, Firefox, Chrome, Safari, VLC, etc.)
         if isCoreAudioOutputPlaying() {
-            return true
+            return .coreAudio
         }
 
         // Layer 2: MediaRemote NowPlaying Application isPlaying check
         if isMediaRemotePlaying() {
-            return true
+            return .mediaRemote
         }
 
         // Layer 3: Apple Music dedicated player state (process-guarded, never launches Music.app)
         if isAppleMusicPlaying() {
-            return true
+            return .music
         }
 
         // Layer 4: Spotify dedicated player state (process-guarded)
         if isSpotifyPlaying() {
-            return true
+            return .spotify
         }
 
         // Layer 5: IOKit power assertions (video-playing in browsers preventing display sleep)
         if isIOKitVideoPlaying() {
-            return true
+            return .iokitVideo
         }
 
-        return false
+        return .none
     }
 
     /// Asynchronous check for backward compatibility with existing callers.
@@ -70,62 +89,192 @@ final class MediaController {
 
     // MARK: - Media Actions
 
-    /// Pauses background media across active sources immediately.
-    /// Only pauses sources that are verified to be currently playing.
+    /// Pauses only the sources that are verified playing right now.
+    /// MediaRemote Pause is sent only when Now Playing itself is playing —
+    /// CoreAudio / IOKit noise is not an addressable client.
     func pauseBackgroundMedia() {
-        didSendMediaRemotePause = false
-        didPauseAppleMusic = false
-        didPauseSpotify = false
-
-        // 1. Explicitly pause Apple Music if actively playing
-        if isAppleMusicPlaying() {
-            didPauseAppleMusic = true
-            _ = NSAppleScript(source: "tell application \"Music\" to pause")?.executeAndReturnError(nil)
-            AppLogger.shared.log("🎵 MediaController: Apple Music paused")
+        let playingPID = coreAudioRunningOutputPID()
+        let snapshot = currentSnapshot(coreAudioPlaying: playingPID != nil)
+        let plan = MediaPlaybackRouting.pausePlan(from: snapshot, pausedPID: playingPID)
+        // A probe-only snapshot (CoreAudio / IOKit, no addressed player) must
+        // not invalidate a resume confirmation that is still in flight.
+        // A CoreAudio PID alone does not store a plan and does not pause
+        // MediaRemote — only Music / Spotify / Now Playing set touchesAnything.
+        if plan.touchesAnything {
+            resumeEpoch &+= 1
+            pausedPlan = plan
         }
+        let detector = playingDetector()
+        let pidText = plan.pausedPID.map { String($0) } ?? "nil"
+        AppLogger.shared.logPipeline(
+            stage: "media",
+            action: "pause",
+            reason: "detector=\(detector.rawValue) paused_source=\(plan.pausedSource.rawValue) pid=\(pidText)"
+        )
+        guard plan.touchesAnything else { return }
 
-        // 2. Explicitly pause Spotify if actively playing
-        if isSpotifyPlaying() {
-            didPauseSpotify = true
-            _ = NSAppleScript(source: "tell application \"Spotify\" to pause")?.executeAndReturnError(nil)
-            AppLogger.shared.log("🎵 MediaController: Spotify paused")
+        if plan.music {
+            let sent = runPlayerScript("tell application \"Music\" to pause")
+            logMediaCommand(action: "pause", command: "Music", sent: sent)
         }
-
-        // 3. Send MediaRemote Pause command (controls Yandex Music, YouTube, Safari, Chrome, Firefox, Podcasts)
-        // Safe: never launches Apple Music (rcd only responds to hardware key codes, not explicit kMRMediaRemoteCommandPause)
-        didSendMediaRemotePause = true
-        sendCommand("kMRMediaRemoteCommandPause")
-        AppLogger.shared.log("🎵 MediaController: MediaRemote NowPlaying paused")
+        if plan.spotify {
+            let sent = runPlayerScript("tell application \"Spotify\" to pause")
+            logMediaCommand(action: "pause", command: "Spotify", sent: sent)
+        }
+        if plan.mediaRemote {
+            // Safe: rcd launches Music.app only for hardware key codes, not for
+            // an explicit kMRMediaRemoteCommandPause.
+            let sent = sendCommand("kMRMediaRemoteCommandPause")
+            logMediaCommand(action: "pause", command: "MediaRemote", sent: sent)
+        }
     }
 
-    /// Resumes playback ONLY for sources that were actively playing and paused by us.
-    /// Never sends blind Play commands to avoid rcd launching Music.app.
+    /// Resumes ONLY the sources stored by the matching pause. A nil plan (this
+    /// controller never paused, or the caller already consumed the plan) sends
+    /// no Play — that is how already-paused media stays paused.
+    /// Never launches Music.app: Play goes to the same addressed source.
     func resumeBackgroundMedia() {
-        // 1. Resume Apple Music if paused by us
-        if didPauseAppleMusic {
-            // Extra safety guard: verify Music is still running before executing AppleScript
-            if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.apple.Music" }) {
-                _ = NSAppleScript(source: "tell application \"Music\" to play")?.executeAndReturnError(nil)
-                AppLogger.shared.log("🎵 MediaController: Apple Music resumed")
-            }
-            didPauseAppleMusic = false
-        }
+        // Decide from the stored plan, then drop it. A nil plan is `.none`
+        // and the guard sends no Play — already-paused media stays paused.
+        let stored = pausedPlan
+        let plan = MediaPlaybackRouting.resumePlan(paused: stored)
+        resumeEpoch &+= 1
+        let epoch = resumeEpoch
+        pausedPlan = nil
+        let detector = playingDetector()
+        AppLogger.shared.logPipeline(
+            stage: "media",
+            action: "resume",
+            reason: "detector=\(detector.rawValue) resume_source=\(plan.resumeSource.rawValue) sent=\(plan.sendsPlay)"
+        )
+        guard plan.sendsPlay else { return }
+        let pausedPID = stored?.pausedPID
 
-        // 2. Resume Spotify if paused by us
-        if didPauseSpotify {
-            if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.spotify.client" }) {
-                _ = NSAppleScript(source: "tell application \"Spotify\" to play")?.executeAndReturnError(nil)
-                AppLogger.shared.log("🎵 MediaController: Spotify resumed")
+        if plan.music {
+            sendResume(source: .music, epoch: epoch, pausedPID: pausedPID) {
+                self.runPlayerScript("tell application \"Music\" to play")
             }
-            didPauseSpotify = false
         }
+        if plan.spotify {
+            sendResume(source: .spotify, epoch: epoch, pausedPID: pausedPID) {
+                self.runPlayerScript("tell application \"Spotify\" to play")
+            }
+        }
+        if plan.mediaRemote {
+            sendResume(source: .mediaRemote, epoch: epoch, pausedPID: pausedPID) {
+                self.sendCommand("kMRMediaRemoteCommandPlay")
+            }
+        }
+    }
 
-        // 3. Resume MediaRemote NowPlaying only if we explicitly paused it
-        if didSendMediaRemotePause {
-            sendCommand("kMRMediaRemoteCommandPlay")
-            AppLogger.shared.log("🎵 MediaController: MediaRemote NowPlaying resumed")
-            didSendMediaRemotePause = false
+    /// One Play, then a single repeat into the SAME source if it is still not
+    /// playing after ~0.4s. A stale epoch (newer pause, or this resume already
+    /// finished) drops the repeat. Does not start Music.app.
+    private func sendResume(
+        source: MediaPlaybackRouting.Source,
+        epoch: Int,
+        pausedPID: pid_t?,
+        play: @escaping () -> Bool
+    ) {
+        let command = source.rawValue
+        let running = source == .mediaRemote || isAppRunning(bundleIdentifier(for: source))
+        guard running else {
+            logMediaCommand(action: "resume", command: command, sent: false, failure: "app_not_running")
+            logResumeConfirmation(source: source, sent: false, confirmed: false)
+            return
         }
+        let sent = play()
+        logMediaCommand(action: "resume", command: command, sent: sent)
+        guard sent else {
+            logResumeConfirmation(source: source, sent: false, confirmed: false)
+            return
+        }
+        confirmResume(source: source, attempt: 1, sent: true, epoch: epoch, pausedPID: pausedPID, play: play)
+    }
+
+    private func confirmResume(
+        source: MediaPlaybackRouting.Source,
+        attempt: Int,
+        sent: Bool,
+        epoch: Int,
+        pausedPID: pid_t?,
+        play: @escaping () -> Bool
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.resumeEpoch == epoch else { return }
+            // PID mismatch is telemetry only. Success stays `isSourcePlaying`
+            // of this same source; a repeat uses `shouldRepeatPlay` and the
+            // same `play` closure. Never Play Music, Spotify, or Now Playing
+            // because some other CoreAudio client is running.
+            if let pausedPID,
+               let currentPID = self.coreAudioRunningOutputPID(),
+               MediaPlaybackRouting.coreAudioPIDMismatch(pausedPID: pausedPID, currentPID: currentPID) {
+                AppLogger.shared.logPipeline(
+                    stage: "media",
+                    code: "pid_mismatch",
+                    action: "resume",
+                    reason: "paused_pid=\(pausedPID) current_pid=\(currentPID)"
+                )
+            }
+            let confirmed = MediaPlaybackRouting.isSourcePlaying(source, snapshot: self.currentSnapshot())
+            if confirmed {
+                self.logResumeConfirmation(source: source, sent: sent, confirmed: true)
+                return
+            }
+            guard MediaPlaybackRouting.shouldRepeatPlay(attempt: attempt, confirmed: confirmed) else {
+                self.logResumeConfirmation(source: source, sent: sent, confirmed: false)
+                return
+            }
+            let repeated = play()
+            self.logMediaCommand(action: "resume", command: source.rawValue, sent: repeated)
+            self.confirmResume(
+                source: source,
+                attempt: attempt + 1,
+                sent: repeated,
+                epoch: epoch,
+                pausedPID: pausedPID,
+                play: play
+            )
+        }
+    }
+
+    private func bundleIdentifier(for source: MediaPlaybackRouting.Source) -> String {
+        switch source {
+        case .music: return "com.apple.Music"
+        case .spotify: return "com.spotify.client"
+        case .mediaRemote, .none: return ""
+        }
+    }
+
+    private func logResumeConfirmation(source: MediaPlaybackRouting.Source, sent: Bool, confirmed: Bool) {
+        if confirmed {
+            AppLogger.shared.logPipeline(
+                stage: "media",
+                action: "resume",
+                reason: "resume_source=\(source.rawValue) sent=\(sent) confirmed=true"
+            )
+        } else {
+            AppLogger.shared.logPipeline(
+                stage: "media",
+                code: "resume_not_confirmed",
+                action: "resume",
+                reason: "source=\(source.rawValue) resume_source=\(source.rawValue) sent=\(sent) confirmed=false"
+            )
+        }
+    }
+
+    private func isAppRunning(_ bundleIdentifier: String) -> Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleIdentifier }
+    }
+
+    private func currentSnapshot(coreAudioPlaying: Bool? = nil) -> MediaPlaybackRouting.Snapshot {
+        MediaPlaybackRouting.Snapshot(
+            musicPlaying: isAppleMusicPlaying(),
+            spotifyPlaying: isSpotifyPlaying(),
+            mediaRemotePlaying: isMediaRemotePlaying(),
+            coreAudioPlaying: coreAudioPlaying ?? isCoreAudioOutputPlaying(),
+            iokitVideoPlaying: isIOKitVideoPlaying()
+        )
     }
 
     // MARK: - Private Probes
@@ -133,6 +282,13 @@ final class MediaController {
     /// Checks if any non-system process is currently outputting audio via CoreAudio hardware IO.
     /// Accurately detects Electron apps (Yandex Music), web browsers (YouTube/video in Firefox/Chrome/Safari), VLC, etc.
     func isCoreAudioOutputPlaying() -> Bool {
+        coreAudioRunningOutputPID() != nil
+    }
+
+    /// First non-system PID with a running CoreAudio output, or nil.
+    /// Same process list, own-pid skip and bundle prefixes as the Bool probe.
+    /// Telemetry for the pause plan only — never an address for Play.
+    func coreAudioRunningOutputPID() -> pid_t? {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -140,12 +296,12 @@ final class MediaController {
         )
         var dataSize: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize) == noErr else {
-            return false
+            return nil
         }
         let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
         var processIDs = [AudioObjectID](repeating: 0, count: count)
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize, &processIDs) == noErr else {
-            return false
+            return nil
         }
 
         let myPid = getpid()
@@ -191,10 +347,10 @@ final class MediaController {
             let bId = bundleID as String
             if !ignoredBundlePrefixes.contains(where: { bId.hasPrefix($0) }) {
                 AppLogger.shared.log("🎵 MediaController: active audio player found via CoreAudio: PID=\(pid), bundle=\(bId)")
-                return true
+                return pid
             }
         }
-        return false
+        return nil
     }
 
     /// Checks if MediaRemote reports active playback using canonical MRMediaRemoteGetNowPlayingApplicationIsPlaying.
@@ -289,11 +445,42 @@ final class MediaController {
         return dlsym(handle, name)
     }
 
-    private func sendCommand(_ commandKey: String) {
-        guard let commandValue = Self.commands[commandKey] else { return }
-        guard let send = symbol("MRMediaRemoteSendCommand") else { return }
+    /// Runs a player AppleScript. Returns false when the script object or the
+    /// execution reports an error. The error dictionary is not logged (it can
+    /// contain the player UI string).
+    @discardableResult
+    private func runPlayerScript(_ source: String) -> Bool {
+        var error: NSDictionary?
+        guard let script = NSAppleScript(source: source) else { return false }
+        _ = script.executeAndReturnError(&error)
+        return error == nil
+    }
+
+    /// `true` only when the private command symbol exists and reports success.
+    @discardableResult
+    private func sendCommand(_ commandKey: String) -> Bool {
+        guard let commandValue = Self.commands[commandKey] else { return false }
+        guard let send = symbol("MRMediaRemoteSendCommand") else { return false }
         typealias FnSend = @convention(c) (Int32, AnyObject?) -> Bool
         let fn = unsafeBitCast(send, to: FnSend.self)
-        _ = fn(commandValue, nil)
+        return fn(commandValue, nil)
+    }
+
+    private func logMediaCommand(action: String, command: String, sent: Bool, failure: String? = nil) {
+        if sent {
+            AppLogger.shared.logPipeline(
+                stage: "media",
+                action: action,
+                reason: "command=\(command) sent=true"
+            )
+        } else {
+            let why = failure ?? (command == "MediaRemote" ? "symbol_missing_or_rejected" : "applescript_error")
+            AppLogger.shared.logPipeline(
+                stage: "media",
+                code: "command_not_sent",
+                action: action,
+                reason: "command=\(command) \(why)"
+            )
+        }
     }
 }

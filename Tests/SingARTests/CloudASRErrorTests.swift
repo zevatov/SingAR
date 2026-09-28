@@ -88,6 +88,53 @@ final class CloudASRErrorTests: XCTestCase {
         XCTAssertTrue(CloudASRError.emptySpeech.showsDedicatedMessage == false)
     }
 
+    func testLogCodesExposeStatusWithoutBody() {
+        XCTAssertEqual(CloudASRError.timeout.logCode, "timeout")
+        XCTAssertEqual(CloudASRError.timeout.logReason, "request_timeout")
+        XCTAssertEqual(CloudASRError.serverError(status: 503).logCode, "http_503")
+        XCTAssertEqual(CloudASRError.emptySpeech.logCode, "empty_speech")
+        XCTAssertEqual(CloudASRError.missingModel.logReason, "model_not_installed")
+        XCTAssertFalse(CloudASRError.serverError(status: 500).logReason.contains("body"))
+    }
+
+    func testStartRefusalErrorCodes() {
+        XCTAssertEqual(
+            DictationController.startRefusalErrorCode(reason: .axDenied, processTrusted: false, secureInput: false),
+            "ax_unavailable"
+        )
+        XCTAssertEqual(
+            DictationController.startRefusalErrorCode(reason: .focusOrSecureInput, processTrusted: true, secureInput: true),
+            "secure_input"
+        )
+        XCTAssertEqual(
+            DictationController.startRefusalErrorCode(reason: .selfFrontmost, processTrusted: true, secureInput: false),
+            "self_frontmost"
+        )
+        XCTAssertEqual(
+            DictationController.startRefusalErrorCode(reason: .focusOrSecureInput, processTrusted: true, secureInput: false),
+            "focus_unverifiable"
+        )
+    }
+
+    func testPolishRetries503AndTransportOnceOnly() {
+        XCTAssertTrue(CloudASR.polishShouldRetry(error: .serverError(status: 503), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .serverError(status: 503), allowRetry: false))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .serverError(status: 500), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .serverError(status: 502), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .invalidKey(status: 401), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .invalidKey(status: 403), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .rateLimited, allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .serverError(status: 404), allowRetry: true))
+        XCTAssertTrue(CloudASR.polishShouldRetry(error: .timeout, allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .timeout, allowRetry: false))
+        let dropped = URLError(.networkConnectionLost)
+        XCTAssertTrue(CloudASR.polishShouldRetry(error: .network(underlying: dropped), allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .network(underlying: dropped), allowRetry: false))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .cancelled, allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .emptySpeech, allowRetry: true))
+        XCTAssertFalse(CloudASR.polishShouldRetry(error: .missingKey, allowRetry: true))
+    }
+
     func testUserMessagesAreNonEmpty() {
         let all: [CloudASRError] = [
             .invalidKey(status: 401), .rateLimited, .serverError(status: 500),
